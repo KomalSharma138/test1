@@ -1,0 +1,784 @@
+package com.consert.core.ejb.session;
+
+import java.util.ArrayList;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Set;
+
+import javax.ejb.EJB;
+import javax.ejb.Stateless;
+
+import org.joda.time.DateTime;
+import org.joda.time.LocalDate;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import com.consert.core.ejb.constant.OpsCenterConstants;
+import com.consert.core.ejb.exception.ProgramTemplateException;
+import com.consert.core.ejb.multitenant.TenantContext;
+import com.consert.core.ejb.multitenant.interfaces.MultiTenantEntityManagerWrapper;
+import com.consert.core.ejb.session.facade.interfaces.DeviceBeanFacadeLocal;
+import com.consert.core.ejb.session.facade.interfaces.ProgramTemplateFacadeLocal;
+import com.consert.core.ejb.session.interfaces.ProgramTemplateBeanRemote;
+import com.consert.core.ejb.session.interfaces.local.ProgramTemplateBeanLocal;
+import com.consert.core.entities.DeviceType;
+import com.consert.core.entities.OpMode;
+import com.consert.core.entities.ProgramTemplate;
+import com.consert.core.entities.ProgramTemplateDcTransitionPoint;
+import com.consert.core.entities.ProgramTemplateProgram;
+import com.consert.core.entities.ProgramTemplateScheduleMonthDay;
+import com.consert.core.entities.ProgramTemplateScheduleRange;
+import com.consert.core.entities.ProgramTemplateTstatTransitionPoint;
+import com.consert.core.model.DeviceTypeModel;
+import com.consert.core.model.ProgramTemplateDCTransitionPointModel;
+import com.consert.core.model.ProgramTemplateModel;
+import com.consert.core.model.ProgramTemplateProgramModel;
+import com.consert.core.model.ProgramTemplateScheduleMonthDayModel;
+import com.consert.core.model.ProgramTemplateScheduleRangeModel;
+import com.consert.core.model.ProgramTemplateTstatTransitionPointModel;
+import com.consert.core.model.validator.ProgramTemplateModelValidator;
+
+/**
+ * Session Bean implementation class ProgramTemplateBean
+ */
+@Stateless(name = "ProgramTemplateBean")
+public class ProgramTemplateBean implements ProgramTemplateBeanRemote, ProgramTemplateBeanLocal
+{
+
+	@EJB
+	private ProgramTemplateFacadeLocal programTemplateFacade;
+	
+	@EJB
+	private DeviceBeanFacadeLocal deviceBeanFacade;
+
+	@EJB
+	private MultiTenantEntityManagerWrapper entityManager;
+
+	
+	private Logger logger = LoggerFactory.getLogger(ProgramTemplateBean.class);
+	
+	@Override
+	public ProgramTemplateModel saveProgramTemplate(ProgramTemplateModel ptModel, Integer tenantId) throws Exception
+	{
+		TenantContext.setCurrentTenant(tenantId);
+		ProgramTemplateModelValidator ptValidator = new ProgramTemplateModelValidator();
+		ptValidator.validateModelObject(ptModel);
+		//The name of the template will be unique, ignoring case, to the other active, non-deleted template names.
+		//This validation is here instead of the POJO validator since it requires a DB lookup.
+		if (0 >= ptModel.getProgramTemplateId())
+		{
+			List<ProgramTemplateModel> existingTemplates = retrieveAllActiveProgramTemplates(TenantContext.getCurrentTenant());
+			for (ProgramTemplateModel existingTemplate : existingTemplates)
+			{
+				if (ptModel.getName().equalsIgnoreCase(existingTemplate.getName()))
+				{
+					throw new ProgramTemplateException("There is already a program template with the name " + ptModel.getName() + ".");
+				}
+			}
+		}
+		else
+		{
+			throw new Exception("This method is only for creating new program templates and not for modifying existing templates.");
+		}
+		try
+		{
+			ProgramTemplate pTEntity = mapProgramTemplateModelToEntity(ptModel);
+			
+			pTEntity.setDateCreated(new DateTime());
+			
+			programTemplateFacade.createProgramTemplate(pTEntity);
+			
+			ptModel = mapProgramTemplateToModel(pTEntity);
+			
+		}
+		catch(Exception e)
+		{
+			logger.error("Failed to saveProgramTemplate, " + e.getMessage(), e);
+			throw e;
+		}
+		
+		return ptModel;
+	}
+	
+	@Override
+	public List<ProgramTemplateModel> retrieveAllActiveProgramTemplates(Integer tenantId) throws Exception
+	{
+		TenantContext.setCurrentTenant(tenantId);
+		List<ProgramTemplateModel> ptModels = new ArrayList<ProgramTemplateModel>();
+		try
+		{
+			List<ProgramTemplate> ptList = programTemplateFacade.getActiveProgramTemplates();
+			if (null != ptList)
+			{
+				for (ProgramTemplate ptEntity : ptList)
+				{
+					if (OpsCenterConstants.TRUE != ptEntity.getDeleteFlag())
+					{
+						ProgramTemplateModel ptModel = mapProgramTemplateToModel(ptEntity);
+						ptModels.add(ptModel);
+					}
+					
+				}
+			}
+		}
+		catch(Exception e)
+		{
+			logger.error("Failed to retrieveAllActiveProgramTemplates, " + e.getMessage(), e);
+			throw e;
+		}
+		
+		return ptModels;
+	}
+	
+	@Override
+	public ProgramTemplateModel retrieveProgramTemplateById(int programTemplateId, Integer tenantId) throws Exception
+	{
+		TenantContext.setCurrentTenant(tenantId);
+		ProgramTemplateModel ptModel = new ProgramTemplateModel();
+		try
+		{
+			
+			ProgramTemplate ptEntity = programTemplateFacade.findProgramTemplateById(programTemplateId);
+			if (null != ptEntity)
+			{
+				
+					 ptModel = mapProgramTemplateToModel(ptEntity);
+			}
+			
+		}
+		catch(Exception e)
+		{
+			logger.error("Failed to retrieveProgramTemplateById for ID: " + programTemplateId + ", " + e.getMessage(), e);
+			throw e;
+		}
+		
+		return ptModel;
+	}
+	
+	@Override
+	public boolean deleteProgramTemplateById(int programTemplateId, String userId, Integer tenantId) throws Exception
+	{
+		TenantContext.setCurrentTenant(tenantId);
+		try
+		{
+			
+			ProgramTemplate ptEntity = programTemplateFacade.findProgramTemplateById(programTemplateId);
+			if (null != ptEntity)
+			{
+				ptEntity.setDeleteFlag(OpsCenterConstants.TRUE);
+				ptEntity.setUserModified(userId);
+				ptEntity.setDateModified(new DateTime());
+			}
+			
+		}
+		catch(Exception e)
+		{
+			logger.error("Failed to deleteProgramTemplateById for ID: " + programTemplateId + ", " + e.getMessage(), e);
+			throw e;
+		}
+		
+		return true;
+	}
+	
+	@Override
+	public boolean updateProgramTemplate(ProgramTemplateModel ptModel, List<ProgramTemplateProgramModel> newPtpModels, List<ProgramTemplateProgramModel> updatedPtpModels, List<Integer> deletedPtpIds, Integer tenantId) throws Exception
+	{
+		TenantContext.setCurrentTenant(tenantId);
+		if (null != ptModel && 0 < ptModel.getProgramTemplateId())
+		{
+			ProgramTemplate ptEntity = programTemplateFacade.findProgramTemplateById(ptModel.getProgramTemplateId());
+			
+			if (null != ptEntity && OpsCenterConstants.FALSE.equalsIgnoreCase(ptEntity.getDeleteFlag()))
+			{
+				if (!ptModel.getName().equals(ptEntity.getName()))
+				{
+					List<ProgramTemplate> existingTemplates = programTemplateFacade.getActiveProgramTemplatesByName(ptModel.getName());
+					if (null != existingTemplates && 0 != existingTemplates.size())
+					{
+						throw new ProgramTemplateException("The program template name of '" + ptModel.getName() + "' is already is use by another template.");
+					}
+				}
+				
+				// If no new programs, no updated programs, and all existing programs removed
+				if ((newPtpModels == null || newPtpModels.isEmpty()) &&
+						(updatedPtpModels == null || updatedPtpModels.isEmpty()) &&
+						((deletedPtpIds != null) 
+								&& (ptEntity.getProgramTemplateProgramCollection() != null) 
+								&& deletedPtpIds.size() == ptEntity.getProgramTemplateProgramCollection().size()))
+				{
+					throw new ProgramTemplateException("Program template must include at least one program.");
+				}
+				
+				if (null != deletedPtpIds && deletedPtpIds.size() > 0)
+				{
+					deleteProgramTemplatePrograms(ptEntity, deletedPtpIds);
+					
+				}
+				
+				if (null != newPtpModels && newPtpModels.size() > 0)
+				{
+					
+					createProgramTemplatePrograms(ptEntity, newPtpModels);
+				}
+				
+				if (null != updatedPtpModels &&  updatedPtpModels.size() > 0)
+				{
+					updateProgramTemplatePrograms(updatedPtpModels);
+					
+				}
+				
+				// This must be done after all validations or else these values will be saved even
+				// if an exception is thrown
+				ptEntity.setDateModified(new DateTime());
+				ptEntity.setUserModified(ptModel.getUserModified());
+				ptEntity.setName(ptModel.getName());  // we know this is a unique name because the exception above was not thrown
+			}
+			else
+			{
+				throw new Exception("Program template ID " + ptModel.getProgramTemplateId() + " is not an active program template.");
+			}
+			
+				
+		}
+		else
+		{
+			throw new Exception("Program template ID was not passed into the service.");
+		}
+		
+		
+		return true;
+	}
+	
+	private boolean deleteProgramTemplatePrograms(ProgramTemplate ptEntity, List<Integer> deletedPtpIds) throws Exception
+	{
+		List<Integer> validPtps = new ArrayList<Integer>();
+		
+		//Validate that the PTP's are a part of the program prior to removing them from the DB.
+		if (null != ptEntity && null != deletedPtpIds && 0 < deletedPtpIds.size())
+		{
+			for (ProgramTemplateProgram ptpEntity : ptEntity.getProgramTemplateProgramCollection())
+			{
+				for (Integer ptpId : deletedPtpIds)
+				{
+					if (ptpId.intValue() == ptpEntity.getProgramTemplateProgramId())
+					{
+						validPtps.add(ptpId);
+					}
+				
+				}
+				
+			}
+				
+		}
+		
+		if (0 < validPtps.size())
+		{
+			programTemplateFacade.removeProgramTemplateProgramByIds(validPtps);
+		}
+		
+		return true;
+	}
+	
+	private boolean updateProgramTemplatePrograms(List<ProgramTemplateProgramModel> ptpModels) throws Exception
+	{
+		ProgramTemplateModelValidator ptValidator = new ProgramTemplateModelValidator();
+		ptValidator.validatePrograms(ptpModels);
+		
+		for (ProgramTemplateProgramModel ptpModel : ptpModels)
+		{
+		
+			if (0 < ptpModel.getProgramTemplateProgramId())
+			{
+				ProgramTemplateProgram existingPtp = programTemplateFacade.findProgramTemplateProgramById(ptpModel.getProgramTemplateProgramId());
+				Set<ProgramTemplateTstatTransitionPoint> existingTstatTps = existingPtp.getProgramTemplateTstatTransitionPointCollection();
+				Set<ProgramTemplateDcTransitionPoint> existingDcTps = existingPtp.getProgramTemplateDcTransitionPointCollection();
+				Set<ProgramTemplateScheduleRange> esistingRange = existingPtp.getProgramTemplateScheduleRangeCollection();				
+				for (ProgramTemplateTstatTransitionPoint tpEntity : existingTstatTps)
+				{
+					boolean tpFound = false;
+					for (ProgramTemplateTstatTransitionPointModel tstatTp : ptpModel.getProgramTemplateTstatTransitionPointCollection())
+					{
+						if (tstatTp.getProgramTemplateTstatTransitionPointId() == tpEntity.getProgramTemplateTstatTransitionPointId())
+						{
+							tpFound = true;
+						}
+					}
+					if (!tpFound)
+					{
+						programTemplateFacade.removeTstatTransitionPoint(tpEntity);
+					}
+
+				}
+				
+				for (ProgramTemplateDcTransitionPoint dcEntity : existingDcTps)
+				{
+					boolean tpFound = false;
+					for (ProgramTemplateDCTransitionPointModel dcTp : ptpModel.getProgramTemplateDcTransitionPointCollection())
+					{
+						if (dcTp.getProgramTemplateDCTransitionPointId() == dcEntity.getProgramTemplateDcTransitionPointId())
+						{
+							tpFound = true;
+						}
+					}
+					if (!tpFound)
+					{
+						programTemplateFacade.removeDcTransitionPoint(dcEntity);
+					}
+					
+				}
+				
+				for(ProgramTemplateScheduleRange schEntity : esistingRange)
+				{
+					boolean schFolund = false;
+					for (ProgramTemplateScheduleRangeModel schTp : ptpModel.getProgramTemplateScheduleRangeCollection())
+					{
+						if (schTp.getProgramTemplateScheduleRangeId() == schEntity.getProgramTemplateScheduleRangeId())
+						{
+							schFolund = true;
+						}
+					}
+					if (!schFolund)
+					{
+						programTemplateFacade.removeProgramScheduleRange(schEntity);;
+					}
+					
+				}
+				
+				//Add the schedule month day model ID to from the existing program to the model so the UI / controller doesn't have to pass this to the service.
+				ProgramTemplateScheduleMonthDayModel schModel = ptpModel.getProgramTemplateScheduleMonthDayModel();
+				if(existingPtp.getProgramTemplateScheduleMonthDay() != null && ptpModel.getSchedByRangeFlag().equals(OpsCenterConstants.FALSE))
+				{
+				schModel.setProgramTemplateScheduleMonthDayId(existingPtp.getProgramTemplateScheduleMonthDay().getProgramTemplateScheduleMonthDayId());
+				}
+				else if(existingPtp.getProgramTemplateScheduleMonthDay() != null && ptpModel.getSchedByRangeFlag().equals(OpsCenterConstants.TRUE))
+				{
+					programTemplateFacade.removeProgramScheduleMonthDay(existingPtp.getProgramTemplateScheduleMonthDay()); 
+				}
+			    
+				ProgramTemplateProgram ptpEntity = mapProgramTemplateProgramModelToEntity(ptpModel, true);
+				ptpEntity = programTemplateFacade.updateProgramTemplateProgram(ptpEntity);
+				
+			}
+			else
+			{
+				throw new Exception("Program template program could not be updated with an ID of " + ptpModel.getProgramTemplateProgramId());
+			}
+			
+			
+
+		}
+		
+		
+		return true;
+	}
+	
+	private boolean createProgramTemplatePrograms(ProgramTemplate ptEntity, List<ProgramTemplateProgramModel> ptpModels) throws Exception
+	{
+		ProgramTemplateModelValidator ptValidator = new ProgramTemplateModelValidator();
+		ptValidator.validatePrograms(ptpModels);
+		
+		for (ProgramTemplateProgramModel ptpModel : ptpModels)
+		{
+			ProgramTemplateProgram ptpEntity = mapProgramTemplateProgramModelToEntity(ptpModel, false);
+			ptpEntity.setProgramTemplateId(ptEntity);
+			programTemplateFacade.createProgramTemplateProgram(ptpEntity);
+			
+			
+		}
+		return true;
+	}
+	
+	private ProgramTemplate mapProgramTemplateModelToEntity (ProgramTemplateModel pTModel) throws Exception
+	{
+		ProgramTemplate ptEntity = new ProgramTemplate();
+		
+		if (0 < pTModel.getProgramTemplateId())
+		{
+			ptEntity.setProgramTemplateId(pTModel.getProgramTemplateId());
+		}
+		ptEntity.setName(pTModel.getName());
+		ptEntity.setDeleteFlag(pTModel.getDeleteFlag());
+		ptEntity.setUserModified(pTModel.getUserModified());
+		//ptEntity.setDateModified(pTModel.getDateModified());
+		ptEntity.setUserCreated(pTModel.getUserCreated());
+		//ptEntity.setDateCreated(pTModel.getDateCreated());
+		
+		Set<ProgramTemplateProgram> programTemplateProgramCollection = new HashSet<ProgramTemplateProgram>();
+		
+		for (ProgramTemplateProgramModel ptpModel : pTModel.getProgramTemplateProgramCollection())
+		{
+			ProgramTemplateProgram ptpEntity = mapProgramTemplateProgramModelToEntity(ptpModel, false);
+			ptpEntity.setProgramTemplateId(ptEntity);
+			programTemplateProgramCollection.add(ptpEntity);
+		}
+				
+		ptEntity.setProgramTemplateProgramCollection(programTemplateProgramCollection);
+		
+		return ptEntity;
+	}
+	
+	private ProgramTemplateProgram mapProgramTemplateProgramModelToEntity(ProgramTemplateProgramModel pTModel, boolean mapIds) throws Exception
+	{ 
+		
+		ProgramTemplateProgram pTEntity = new ProgramTemplateProgram();
+				
+		if (0 < pTModel.getProgramTemplateProgramId() && mapIds)
+		{
+			pTEntity.setProgramTemplateProgramId(pTModel.getProgramTemplateProgramId());
+			
+		}
+		pTEntity.setName(pTModel.getName());
+		pTEntity.setSchedByRangeFlag(pTModel.getSchedByRangeFlag());
+		pTEntity.setUserModified(pTModel.getUserModified());
+		pTEntity.setDateModified(pTModel.getDateModified());
+		pTEntity.setUserCreated(pTModel.getUserCreated());
+		pTEntity.setDateCreated(pTModel.getDateCreated());
+		
+		
+		if(pTModel.getSchedByRangeFlag().equals(OpsCenterConstants.TRUE) && pTModel.getProgramTemplateScheduleRangeCollection() != null 
+				&& !pTModel.getProgramTemplateScheduleRangeCollection().isEmpty())
+		{
+		Set<ProgramTemplateScheduleRange> programTemplateScheduleRangeCollection = new HashSet<ProgramTemplateScheduleRange>();
+		for(ProgramTemplateScheduleRangeModel ptsrm : pTModel.getProgramTemplateScheduleRangeCollection())
+		{
+		ProgramTemplateScheduleRange scnRangeEntity = mapProgramTemplateScheduleRangeModelToEntity(ptsrm, mapIds);
+		scnRangeEntity.setProgramTemplateProgramId(pTEntity);
+		programTemplateScheduleRangeCollection.add(scnRangeEntity);
+		}
+		pTEntity.setProgramTemplateScheduleRangeCollection(programTemplateScheduleRangeCollection);;
+		}
+		else
+		{
+		ProgramTemplateScheduleMonthDay schEntity = mapProgramTemplateScheduleMonthDayModelToEntity(pTModel.getProgramTemplateScheduleMonthDayModel(), mapIds);
+		schEntity.setProgramTemplateProgramId(pTEntity);
+		pTEntity.setProgramTemplateScheduleMonthDay(schEntity);
+		}
+		
+		Set<ProgramTemplateTstatTransitionPoint> programTemplateTstatTransitionPointCollection = new HashSet<ProgramTemplateTstatTransitionPoint>();
+		
+		for (ProgramTemplateTstatTransitionPointModel tstatTpModel : pTModel.getProgramTemplateTstatTransitionPointCollection())
+		{
+			ProgramTemplateTstatTransitionPoint tstatTpEntity = mapProgramTemplateTstatTransitionPointModelToEntity(tstatTpModel, mapIds);
+			tstatTpEntity.setProgramTemplateProgramId(pTEntity);
+			programTemplateTstatTransitionPointCollection.add(tstatTpEntity);
+		}
+				
+		pTEntity.setProgramTemplateTstatTransitionPointCollection(programTemplateTstatTransitionPointCollection);
+		
+		Set<ProgramTemplateDcTransitionPoint> programTemplateDcTransitionPointCollection = new HashSet<ProgramTemplateDcTransitionPoint>();
+		
+		for (ProgramTemplateDCTransitionPointModel dcTpModel : pTModel.getProgramTemplateDcTransitionPointCollection())
+		{
+			ProgramTemplateDcTransitionPoint dcTpEntity = mapProgramTemplateDcTransitionPointToEntity(dcTpModel, mapIds);
+			dcTpEntity.setProgramTemplateProgramId(pTEntity);
+			programTemplateDcTransitionPointCollection.add(dcTpEntity);
+		}
+				
+		pTEntity.setProgramTemplateDcTransitionPointCollection(programTemplateDcTransitionPointCollection);
+		
+		return pTEntity;
+	}
+	
+	
+	private ProgramTemplateScheduleMonthDay mapProgramTemplateScheduleMonthDayModelToEntity(ProgramTemplateScheduleMonthDayModel schModel, boolean mapIds) throws Exception
+	{
+		ProgramTemplateScheduleMonthDay schEntity = new ProgramTemplateScheduleMonthDay();
+		
+		if (0 < schModel.getProgramTemplateScheduleMonthDayId() && mapIds)
+		{
+			schEntity.setProgramTemplateScheduleMonthDayId(schModel.getProgramTemplateScheduleMonthDayId());
+		}
+		
+		schEntity.setJan(schModel.getJan());
+		schEntity.setFeb(schModel.getFeb());
+		schEntity.setMar(schModel.getMar());
+		schEntity.setApr(schModel.getApr());
+		schEntity.setMay(schModel.getMay());
+		schEntity.setJun(schModel.getJun());
+		schEntity.setJul(schModel.getJul());
+		schEntity.setAug(schModel.getAug());
+		schEntity.setSep(schModel.getSep());
+		schEntity.setOct(schModel.getOct());
+		schEntity.setNov(schModel.getNov());
+		schEntity.setDec(schModel.getDec());
+		schEntity.setSun(schModel.getSun());
+		schEntity.setMon(schModel.getMon());
+		schEntity.setTue(schModel.getTue());
+		schEntity.setWed(schModel.getWed());
+		schEntity.setThu(schModel.getThu());
+		schEntity.setFri(schModel.getFri());
+		schEntity.setSat(schModel.getSat());
+		schEntity.setUserModified(schModel.getUserModified());
+		schEntity.setDateModified(schModel.getDateModified());
+		schEntity.setUserCreated(schModel.getUserCreated());
+		schEntity.setDateCreated(schModel.getDateCreated());
+		
+		return schEntity;
+	}
+	
+	
+	private ProgramTemplateScheduleRange mapProgramTemplateScheduleRangeModelToEntity(ProgramTemplateScheduleRangeModel schModel, boolean mapIds) throws Exception
+	{
+		ProgramTemplateScheduleRange schEntity = new ProgramTemplateScheduleRange();
+		
+		if (0 < schModel.getProgramTemplateScheduleRangeId() && mapIds)
+		{
+			schEntity.setProgramTemplateScheduleRangeId(schModel.getProgramTemplateScheduleRangeId());
+		}
+		
+        schEntity.setStartDate(schModel.getStartDate());
+        schEntity.setEndDate(schModel.getEndDate());
+		schEntity.setUserModified(schModel.getUserModified());
+		schEntity.setDateModified(schModel.getDateModified());
+		schEntity.setUserCreated(schModel.getUserCreated());
+		schEntity.setDateCreated(schModel.getDateCreated());
+		
+		return schEntity;
+	}
+	 
+	private ProgramTemplateTstatTransitionPoint mapProgramTemplateTstatTransitionPointModelToEntity(ProgramTemplateTstatTransitionPointModel tstatTpModel, boolean mapIds) throws Exception
+	{
+		ProgramTemplateTstatTransitionPoint tstatTpEntity = new ProgramTemplateTstatTransitionPoint();
+		if (0 < tstatTpModel.getProgramTemplateTstatTransitionPointId() && mapIds)
+		{
+			tstatTpEntity.setProgramTemplateTstatTransitionPointId(tstatTpModel.getProgramTemplateTstatTransitionPointId());
+		}
+		
+		tstatTpEntity.setTpTime(tstatTpModel.getTpTime());
+		tstatTpEntity.setPrefHeatTemp(tstatTpModel.getPrefHeatTemp());
+		tstatTpEntity.setPrefCoolTemp(tstatTpModel.getPrefCoolTemp());
+		
+		List<OpMode> tstatOpModes = deviceBeanFacade.getOpModeByOpModeId(tstatTpModel.getOpModeId());
+		
+		if (null == tstatOpModes || 0 == tstatOpModes.size())
+		{
+			throw new Exception("Not able to set tstat transition point op mode to the passed value of " + tstatTpModel.getOpModeId());
+		}
+		
+		tstatTpEntity.setOpModeId(tstatOpModes.get(0));
+		
+		tstatTpEntity.setMaxTemp(tstatTpModel.getMaxTemp());
+		tstatTpEntity.setMinTemp(tstatTpModel.getMinTemp());
+		
+		tstatTpEntity.setUserModified(tstatTpModel.getUserModified());
+		tstatTpEntity.setDateModified(tstatTpModel.getDateModified());
+		tstatTpEntity.setUserCreated(tstatTpModel.getUserCreated());
+		tstatTpEntity.setDateCreated(tstatTpModel.getDateCreated());
+		
+		return tstatTpEntity;
+	}
+	
+	private ProgramTemplateDcTransitionPoint mapProgramTemplateDcTransitionPointToEntity(ProgramTemplateDCTransitionPointModel dcTpModel, boolean mapIds)
+	{
+		ProgramTemplateDcTransitionPoint dcTpEntity = new ProgramTemplateDcTransitionPoint();
+		
+		if (0 < dcTpModel.getProgramTemplateDCTransitionPointId() && mapIds)
+		{
+			dcTpEntity.setProgramTemplateDcTransitionPointId(dcTpModel.getProgramTemplateDCTransitionPointId());
+		}
+		
+		dcTpEntity.setTpTime(dcTpModel.getTpTime());
+		
+		DeviceType dtId = deviceBeanFacade.findDeviceTypeByDeviceTypeId(dcTpModel.getDeviceType().getDeviceTypeId());
+		dcTpEntity.setDeviceTypeId(dtId);
+		
+		dcTpEntity.setPowerStatusFlag(dcTpModel.getPowerStatusFlag());
+		dcTpEntity.setUserModified(dcTpModel.getUserModified());
+		dcTpEntity.setDateModified(dcTpModel.getDateModified());
+		dcTpEntity.setUserCreated(dcTpModel.getUserCreated());
+		dcTpEntity.setDateCreated(dcTpModel.getDateCreated());
+		
+		return dcTpEntity;
+	}
+	
+	private ProgramTemplateModel mapProgramTemplateToModel (ProgramTemplate ptEntity) throws Exception
+	{
+		ProgramTemplateModel ptModel = new ProgramTemplateModel();
+		
+		ptModel.setProgramTemplateId(ptEntity.getProgramTemplateId());
+		
+		ptModel.setName(ptEntity.getName());
+		ptModel.setDeleteFlag(ptEntity.getDeleteFlag());
+		ptModel.setUserModified(ptEntity.getUserModified());
+		ptModel.setDateModified(ptEntity.getDateModified());
+		ptModel.setUserCreated(ptEntity.getUserCreated());
+		ptModel.setDateCreated(ptEntity.getDateCreated());
+		
+		List<ProgramTemplateProgramModel> programTemplateProgramCollection = new ArrayList<ProgramTemplateProgramModel>();
+		
+		for (ProgramTemplateProgram ptpEntity : ptEntity.getProgramTemplateProgramCollection())
+		{
+			ProgramTemplateProgramModel ptpModel = mapProgramTemplateProgramToModel(ptpEntity);
+			programTemplateProgramCollection.add(ptpModel);
+			
+		}
+				
+		ptModel.setProgramTemplateProgramCollection(programTemplateProgramCollection);
+		
+		return ptModel;
+	}
+	
+	private ProgramTemplateProgramModel mapProgramTemplateProgramToModel(ProgramTemplateProgram ptpEntity) throws Exception
+	{ 
+				
+		ProgramTemplateProgramModel ptpModel = new ProgramTemplateProgramModel();
+				
+		ptpModel.setProgramTemplateProgramId(ptpEntity.getProgramTemplateProgramId());
+			
+		
+		ptpModel.setName(ptpEntity.getName());
+		ptpModel.setSchedByRangeFlag(ptpEntity.getSchedByRangeFlag());
+		ptpModel.setUserModified(ptpEntity.getUserModified());
+		ptpModel.setDateModified(ptpEntity.getDateModified());
+		ptpModel.setUserCreated(ptpEntity.getUserCreated());
+		ptpModel.setDateCreated(ptpEntity.getDateCreated());
+		
+		if(ptpEntity.getSchedByRangeFlag().equals(OpsCenterConstants.TRUE) && ptpEntity.getProgramTemplateScheduleRangeCollection() != null 
+				&& !ptpEntity.getProgramTemplateScheduleRangeCollection().isEmpty())
+		{
+			List<ProgramTemplateScheduleRangeModel> ptmsrmList = new ArrayList<ProgramTemplateScheduleRangeModel>();
+			for(ProgramTemplateScheduleRange ptsrm : ptpEntity.getProgramTemplateScheduleRangeCollection())
+			{
+			ProgramTemplateScheduleRangeModel schRangeModel = mapProgramTemplateScheduleRangeModelToModel(ptsrm);
+			ptmsrmList.add(schRangeModel);
+			}
+			ptpModel.setProgramTemplateScheduleRangeCollection(ptmsrmList);
+			
+		}
+		else
+		{
+			ProgramTemplateScheduleMonthDayModel schModel = mapProgramTemplateScheduleMonthDayModelToModel(ptpEntity.getProgramTemplateScheduleMonthDay());
+			
+			ptpModel.setProgramTemplateScheduleMonthDayModel(schModel);
+		}
+		
+		
+		List<ProgramTemplateTstatTransitionPointModel> programTemplateTstatTransitionPointCollection = new ArrayList<ProgramTemplateTstatTransitionPointModel>();
+		
+		for (ProgramTemplateTstatTransitionPoint tstatTpEntity : ptpEntity.getProgramTemplateTstatTransitionPointCollection())
+		{
+			ProgramTemplateTstatTransitionPointModel tstatTpModel = mapProgramTemplateTstatTransitionPointToModel(tstatTpEntity);
+			
+			programTemplateTstatTransitionPointCollection.add(tstatTpModel);
+		}
+				
+		ptpModel.setProgramTemplateTstatTransitionPointCollection(programTemplateTstatTransitionPointCollection);
+		
+		List<ProgramTemplateDCTransitionPointModel> programTemplateDcTransitionPointCollection = new ArrayList<ProgramTemplateDCTransitionPointModel>();
+		
+		for (ProgramTemplateDcTransitionPoint dcTpEntity : ptpEntity.getProgramTemplateDcTransitionPointCollection())
+		{
+			ProgramTemplateDCTransitionPointModel dcTpModel = mapProgramTemplateDcTransitionPointToModel(dcTpEntity);
+			
+			programTemplateDcTransitionPointCollection.add(dcTpModel);
+		}
+				
+		ptpModel.setProgramTemplateDcTransitionPointCollection(programTemplateDcTransitionPointCollection);
+		
+		return ptpModel;
+	}
+	
+	
+	private ProgramTemplateScheduleMonthDayModel mapProgramTemplateScheduleMonthDayModelToModel(ProgramTemplateScheduleMonthDay schEntity) throws Exception
+	{
+		ProgramTemplateScheduleMonthDayModel schModel = new ProgramTemplateScheduleMonthDayModel();
+		
+		schModel.setProgramTemplateScheduleMonthDayId(schEntity.getProgramTemplateScheduleMonthDayId());
+		
+		schModel.setJan(schEntity.getJan());
+		schModel.setFeb(schEntity.getFeb());
+		schModel.setMar(schEntity.getMar());
+		schModel.setApr(schEntity.getApr());
+		schModel.setMay(schEntity.getMay());
+		schModel.setJun(schEntity.getJun());
+		schModel.setJul(schEntity.getJul());
+		schModel.setAug(schEntity.getAug());
+		schModel.setSep(schEntity.getSep());
+		schModel.setOct(schEntity.getOct());
+		schModel.setNov(schEntity.getNov());
+		schModel.setDec(schEntity.getDec());
+		schModel.setSun(schEntity.getSun());
+		schModel.setMon(schEntity.getMon());
+		schModel.setTue(schEntity.getTue());
+		schModel.setWed(schEntity.getWed());
+		schModel.setThu(schEntity.getThu());
+		schModel.setFri(schEntity.getFri());
+		schModel.setSat(schEntity.getSat());
+		schModel.setUserModified(schEntity.getUserModified());
+		schModel.setDateModified(schEntity.getDateModified());
+		schModel.setUserCreated(schEntity.getUserCreated());
+		schModel.setDateCreated(schEntity.getDateCreated());
+		
+		return schModel;
+	}
+	
+	
+	private ProgramTemplateScheduleRangeModel mapProgramTemplateScheduleRangeModelToModel(ProgramTemplateScheduleRange schEntity) throws Exception
+	{
+		ProgramTemplateScheduleRangeModel schRangeModel = new ProgramTemplateScheduleRangeModel();
+		
+		schRangeModel.setProgramTemplateScheduleRangeId(schEntity.getProgramTemplateScheduleRangeId());
+		
+		schRangeModel.setStartDate(new LocalDate(schEntity.getStartDate()));
+		schRangeModel.setEndDate(new LocalDate(schEntity.getEndDate()));
+		schRangeModel.setUserModified(schEntity.getUserModified());
+		schRangeModel.setDateModified(schEntity.getDateModified());
+		schRangeModel.setUserCreated(schEntity.getUserCreated());
+		schRangeModel.setDateCreated(schEntity.getDateCreated());
+		
+		return schRangeModel;
+	}
+	
+	private ProgramTemplateTstatTransitionPointModel mapProgramTemplateTstatTransitionPointToModel(ProgramTemplateTstatTransitionPoint tstatTpEntity) throws Exception
+	{
+		ProgramTemplateTstatTransitionPointModel tstatTpModel = new ProgramTemplateTstatTransitionPointModel();
+		
+		tstatTpModel.setProgramTemplateTstatTransitionPointId(tstatTpEntity.getProgramTemplateTstatTransitionPointId());
+		
+		
+		tstatTpModel.setTpTime(tstatTpEntity.getTpTime());
+		tstatTpModel.setPrefHeatTemp(tstatTpEntity.getPrefHeatTemp());
+		tstatTpModel.setPrefCoolTemp(tstatTpEntity.getPrefCoolTemp());
+		
+				
+		tstatTpModel.setOpModeId(tstatTpEntity.getOpModeId().getOpModeId());
+		tstatTpModel.setOpModeName(tstatTpEntity.getOpModeId().getOpModeName());
+		
+		tstatTpModel.setMaxTemp(tstatTpEntity.getMaxTemp());
+		tstatTpModel.setMinTemp(tstatTpEntity.getMinTemp());
+		
+		tstatTpModel.setUserModified(tstatTpEntity.getUserModified());
+		tstatTpModel.setDateModified(tstatTpEntity.getDateModified());
+		tstatTpModel.setUserCreated(tstatTpEntity.getUserCreated());
+		tstatTpModel.setDateCreated(tstatTpEntity.getDateCreated());
+		
+		return tstatTpModel;
+	}
+	
+	private ProgramTemplateDCTransitionPointModel mapProgramTemplateDcTransitionPointToModel(ProgramTemplateDcTransitionPoint dcTpEntity)
+	{
+		ProgramTemplateDCTransitionPointModel dcTpModel = new ProgramTemplateDCTransitionPointModel();
+		
+		
+		dcTpModel.setProgramTemplateDCTransitionPointId(dcTpEntity.getProgramTemplateDcTransitionPointId());
+		
+		
+		dcTpModel.setTpTime(dcTpEntity.getTpTime());
+		
+		DeviceTypeModel dt = new DeviceTypeModel(dcTpEntity.getDeviceTypeId().getDeviceTypeId(), dcTpEntity.getDeviceTypeId().getDeviceTypeName());
+		
+		dcTpModel.setDeviceType(dt);
+		
+		
+		dcTpModel.setPowerStatusFlag(dcTpEntity.getPowerStatusFlag());
+		dcTpModel.setUserModified(dcTpEntity.getUserModified());
+		dcTpModel.setDateModified(dcTpEntity.getDateModified());
+		dcTpModel.setUserCreated(dcTpEntity.getUserCreated());
+		dcTpModel.setDateCreated(dcTpEntity.getDateCreated());
+		
+		return dcTpModel;
+	}
+	
+
+
+}

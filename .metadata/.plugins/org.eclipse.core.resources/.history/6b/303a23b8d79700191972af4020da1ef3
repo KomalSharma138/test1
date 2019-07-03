@@ -1,0 +1,211 @@
+/**
+ * 
+ */
+package com.consert.core.ejb.session.facade;
+
+import java.util.List;
+
+import javax.ejb.EJB;
+import javax.ejb.Stateless;
+import javax.persistence.EntityManager;
+import javax.persistence.PersistenceContext;
+import javax.persistence.Query;
+
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import com.consert.core.ejb.multitenant.interfaces.MultiTenantEntityManagerWrapper;
+import com.consert.core.ejb.session.facade.interfaces.ProgramTemplateFacadeLocal;
+import com.consert.core.entities.ProgramTemplate;
+import com.consert.core.entities.ProgramTemplateDcTransitionPoint;
+import com.consert.core.entities.ProgramTemplateProgram;
+import com.consert.core.entities.ProgramTemplateScheduleMonthDay;
+import com.consert.core.entities.ProgramTemplateScheduleRange;
+import com.consert.core.entities.ProgramTemplateTstatTransitionPoint;
+
+/**
+ * @author Newj
+ *
+ */
+@Stateless
+public class ProgramTemplateFacade implements ProgramTemplateFacadeLocal
+{
+
+	private final Logger logger = LoggerFactory.getLogger(getClass());
+
+	@EJB
+	private MultiTenantEntityManagerWrapper    em;
+	@Override
+	public ProgramTemplate createProgramTemplate(ProgramTemplate programTemplate) throws Exception
+	{
+		em.persist(programTemplate);
+		em.flush();
+				
+		return programTemplate;
+	}
+
+	@Override
+	public ProgramTemplateProgram createProgramTemplateProgram(ProgramTemplateProgram programTemplateProgram) throws Exception
+	{
+		em.persist(programTemplateProgram);
+				
+		return programTemplateProgram;
+	}
+	
+	@Override
+	public ProgramTemplateProgram updateProgramTemplateProgram(ProgramTemplateProgram programTemplateProgram) throws Exception
+	{
+		programTemplateProgram = em.merge(programTemplateProgram);
+
+				
+		return programTemplateProgram;
+	}
+	
+	@Override
+	public ProgramTemplateScheduleMonthDay createProgramTemplateScheduleMonthDay(ProgramTemplateScheduleMonthDay programTemplateScheduleMonthDay) throws Exception
+	{
+		em.persist(programTemplateScheduleMonthDay);
+						
+		return programTemplateScheduleMonthDay;
+	}
+	
+	@Override
+	public ProgramTemplateScheduleRange createProgramTemplateScheduleRange(ProgramTemplateScheduleRange programTemplateScheduleRange) throws Exception
+	{
+		em.persist(programTemplateScheduleRange);
+						
+		return programTemplateScheduleRange;
+	}
+	
+	@Override
+	public boolean removeProgramTemplateProgramByIds(List<Integer> ptpIds) throws Exception
+	{
+		
+		final Query query = em.createNamedQuery("removeProgramTemplateProgramByIds");
+		query.setParameter("programTemplateProgramIds", ptpIds);
+		query.executeUpdate();
+
+		return true;
+	}
+	
+	@Override
+	public ProgramTemplateTstatTransitionPoint createProgramTemplateTstatTransitionPoint(ProgramTemplateTstatTransitionPoint programTemplateTstatTransitionPoint) throws Exception
+	{
+		em.persist(programTemplateTstatTransitionPoint);
+						
+		return programTemplateTstatTransitionPoint;
+	}
+	
+	@Override
+	public ProgramTemplateDcTransitionPoint createProgramTemplateDcTransitionPoint(ProgramTemplateDcTransitionPoint programTemplateDcTransitionPoint) throws Exception
+	{
+		em.persist(programTemplateDcTransitionPoint);
+						
+		return programTemplateDcTransitionPoint;
+	}
+	
+	@Override
+	public ProgramTemplate getActiveProgramTemplateById(int ptId)
+	{
+		List<ProgramTemplate> results = null;
+		ProgramTemplate programTemplate = null;
+
+		Query query = em.createNamedQuery("getActiveProgramTemplateById");
+		query.setParameter("programTemplateId", ptId);
+
+		results = CastUtil.list(query.getResultList());
+		
+		if(!(results==null || results.isEmpty()))
+		{
+			programTemplate = results.get(0);
+		}
+		return programTemplate;
+	}
+	
+	@Override
+	public ProgramTemplate findProgramTemplateById(int ptId)
+	{
+		ProgramTemplate programTemplate = null;
+
+		programTemplate = em.find(ProgramTemplate.class, ptId);
+
+		return programTemplate;
+	}
+	
+	@Override
+	public ProgramTemplateProgram findProgramTemplateProgramById(int ptpId)
+	{
+		ProgramTemplateProgram programTemplateProgram = null;
+
+		programTemplateProgram = em.find(ProgramTemplateProgram.class, ptpId);
+
+		return programTemplateProgram;
+	}
+	
+	@Override
+	public List<ProgramTemplate> getProgramTemplates()
+	{
+
+		List<ProgramTemplate> results = null;
+
+		Query query = em.createNamedQuery("getProgramTemplates");
+
+		results = CastUtil.list(query.getResultList());
+
+		return results;
+	}
+	
+	@Override
+	public List<ProgramTemplate> getActiveProgramTemplates()
+	{
+
+		List<ProgramTemplate> results = null;
+
+		Query query = em.createNamedQuery("getActiveProgramTemplates");
+
+		results = CastUtil.list(query.getResultList());
+
+		return results;
+	}
+	
+	@Override
+	public List<ProgramTemplate> getActiveProgramTemplatesByName(String ptName)
+	{
+
+		List<ProgramTemplate> results = null;
+
+		Query query = em.createNamedQuery("getActiveProgramTemplatesByName");
+		query.setParameter("name", ptName);
+		results = CastUtil.list(query.getResultList());
+
+		return results;
+	}
+	
+	@Override
+	public ProgramTemplate updateProgramTemplate(ProgramTemplate programTemplate) throws Exception
+	{
+		em.merge(programTemplate);
+		em.flush();
+				
+		return programTemplate;
+	}
+
+	@Override
+	public void removeTstatTransitionPoint(ProgramTemplateTstatTransitionPoint tpEntity) throws Exception {
+		em.remove(tpEntity);
+		
+	}
+
+	@Override
+	public void removeDcTransitionPoint(ProgramTemplateDcTransitionPoint dcEntity) throws Exception {
+		em.remove(dcEntity);
+		
+	}
+	
+	@Override
+	public void removeProgramScheduleRange(ProgramTemplateScheduleRange schEntity) throws Exception {
+		em.remove(schEntity);
+		
+	}
+	
+}

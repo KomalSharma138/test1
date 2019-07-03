@@ -1,0 +1,474 @@
+var tstat = {
+	current: {
+		id: -1,
+		version:-1
+	},
+	available: [],
+	history: [],
+	user: $('ul.userActions:first-child').children('a').html()
+};
+var lcs = {
+	current: {
+		id: -1,
+		version:-1
+	},
+	available:[],
+	history: [],
+	user: $('.userActions').first().children('li').children('a').html()
+};
+
+var mrlcs = {
+		current: {
+			id: -1,
+			version:'-1'
+		},
+		available:[],
+		history: [],
+		user: $('.userActions').first().children('li').children('a').html()
+	};
+
+var loading = $('#loading');
+var loadingProg = $('<div />').attr('id','progBar');
+loadingProg.progressbar({value: 0});
+var limit = 0;
+
+function sortTables(){
+	$('.table-sort').stupidtable();
+	$('.table-sort').bind('aftertablesort', function (event, data) {
+		var th = $(this).find("th");
+		th.find(".arrow").remove();
+		$(this).find('.sortable').append('<span class="arrow fa fa-sort pull-right"></span>');
+		th.eq(data.column).find(".arrow").remove();
+		var sortType = th.eq(data.column).attr('data-sort');
+		if(sortType == 'int'){
+			sortIcon = 'numeric-';
+		}else if(sortType == 'string'){
+			sortIcon = 'alpha-';
+		}else{
+			var sortIcon = 'amount-';
+		}
+		var arrow = data.direction === "asc" ? "asc" : "desc";
+		th.eq(data.column).append('<span class="arrow fa fa-sort-' + sortIcon + arrow +' pull-right"></span>');
+	});
+}
+function updateProg(){
+	var loadingProg = $('#progBar');
+	var progVal = loadingProg.progressbar("value");
+	
+	if(progVal < limit){
+		loadingProg.progressbar({value: progVal + 1});
+		setTimeout(function(){updateProg();}, 80);
+	}else if(progVal >= 100){
+		$('#loading').hide('fade','fast', function(){
+			$('#wallplate').show('fade','slow');
+			$('#lcs').show('fade','slow');
+			$('#mrlcs').show('fade','slow');
+		});
+	}
+}
+
+function getCurrent(){
+	loading.children('p').removeClass('error').html('Detecting Current Firmware Versions');
+	$.ajax({
+		url: (Consert.ctxPath || '' ) + '/json/ota/otaparameters',
+		success: function(res){
+			var restart = true;
+			$.each(res, function(imgId, current){
+				if(current.deviceSelector && current.deviceSelector.trim() == "2"){
+					tstat.current.id = current.imageId;
+					tstat.current.version = (current.imageName == null ? "0" : current.imageName);
+					restart = false;
+				}else if(current.deviceSelector && current.deviceSelector.trim() == "1"){
+					lcs.current.id = current.imageId;
+					lcs.current.version = (current.imageName == null ? "0" : current.imageName);
+					restart = false;
+				}else if(current.deviceSelector && current.deviceSelector.trim() == "3"){
+					mrlcs.current.id = current.imageId;
+					mrlcs.current.version = (current.imageName == null ? "0" : current.imageName.trim());
+					restart = false;
+				}	
+			});
+			
+			if(restart){
+				loading.children('p').addClass('error').html('ERROR: Unable to detect current firmware versions. Trying again in 5 seconds');
+				setTimeout(function(){getCurrent()}, 5 * 1000);		
+			}else{
+				limit = 14.29;
+				updateProg();
+				setTimeout(function(){getAvailable()}, 500);
+			}
+		},
+		error: function(res){
+			loading.children('p').addClass('error').html('ERROR: Unable to detect current firmware versions. Trying again in 5 seconds');
+			setTimeout(function(){getCurrent()}, 5 * 1000);			
+		}
+	});
+}
+
+function getAvailable(){
+	loading.children('p').html('Fetching available firmware list');
+	$.ajax({
+		url: (Consert.ctxPath || '' ) + '/json/ota/firmwareavailable',
+		success: function(res){
+			limit = 33.34;
+			updateProg();
+
+			$.each(res, function(imgId, img){
+				if(img.deviceSelector.trim() == "2"){
+					tstat.available.push(img);
+				}else if(img.deviceSelector.trim() == "1"){
+					lcs.available.push(img);
+				}else if(img.deviceSelector.trim() == "3"){
+					mrlcs.available.push(img);
+				}			
+			});
+			
+			setTimeout(function(){getHistory()}, 500);
+		},
+		error: function(res){
+			loading.children('p').addClass('error').html('ERROR: Unable to retrieve available firmware. Trying again in 5 seconds');
+			setTimeout(function(){getAvailable()}, 5 * 1000);			
+		}
+	});
+}
+
+function getHistory(){
+	loading.children('p').html('Fetching firmware download history');
+	$.ajax({
+		url: (Consert.ctxPath || '' ) + '/json/ota/otahistory',
+		success: function(res){
+			limit = 50.01;
+			updateProg();
+			
+			$.each(res, function(histId, history){		
+				if(history.otaHisPK.deviceSelector.trim() == "2"){
+					tstat.history.push(history);
+				}else if(history.otaHisPK.deviceSelector.trim() == "1"){
+					lcs.history.push(history);
+				}else if(history.otaHisPK.deviceSelector.trim() == "3"){
+					mrlcs.history.push(history);
+				}				
+			});
+			
+			limit = limit + 14.29;
+			if(tstat.current.version > -1){
+				setTimeout(function(){buildTstat()}, 500);
+			}else{
+				$('#wallplate').remove();
+			}
+			limit = limit + 14.29;
+			if(lcs.current.version > -1){
+				setTimeout(function(){buildLcs()}, 500);
+			}else{
+				$('#lcs').remove();
+			}
+			limit = limit + 14.29;
+			if(mrlcs.current.version != '-1'){
+				setTimeout(function(){buildMrLcs()}, 500);
+			}else{
+				$('#mrlcs').remove();
+			}
+			
+			limit = 100;
+			updateProg();
+			setTimeout(function(){
+				sortTables();
+				$.each($('.table-sort'), function(){
+					$(this).find('th:first').click().click();
+				});
+			}, 3 * 1000);
+		},
+		error: function(res){
+			loading.children('p').addClass('error').html('ERROR: Unable to retrieve firmware download history. Trying again in 5 seconds');
+			setTimeout(function(){getHistory()}, 5 * 1000);			
+		}
+	});
+}
+
+function buildTstat(){
+	var tstatDiv = $('#wallplate');
+	var tstatH3 = $('<h3 />').addClass('nomarginbottom').html('Wallplate Firmware').appendTo( tstatDiv );
+	var tstatList = $('<div />').attr('id', 'tstatList').appendTo( tstatDiv );
+	loading.children('p').html('Building Wallplate Firmware lists');
+	updateProg();
+	
+	$.each(tstat.available, function(fwIndex, tstatFw){
+		if(firmwareVersionCompare(tstatFw.imageName.trim(), tstat.current.version.trim())){
+			var $box = $('<div />').attr('ordering', tstatFw.imageName).addClass('box').css('width','90%').appendTo( tstatList );
+			var $status = $('<strong />').addClass('pull-right').html('NEW').appendTo( $box );
+			var $version = $('<h3 />').html(tstatFw.imageName).appendTo( $box );
+			var $download = $('<button />').addClass('btn btn-green btn-medium pull-right').html('Update to ' + tstatFw.imageName).click(function(){
+				var sure = confirm('Note! You are starting a firmware upgrade. The process is irreversible, runs overnight and updating all devices can take several days. Proceed only if you want to start the process, otherwise click Cancel. For additional information, please consult the user guide.');
+				
+				if(sure)
+					updateFw(tstat.current.id, tstatFw, 'TSTAT');
+			}).appendTo( $box );
+			var $added = $('<div />').html('Added: ' + moment(tstatFw.imageUpdateTs).format('MMM DD, YYYY hh:mm A')).appendTo( $box );
+		}else if(tstatFw.imageName.trim() == tstat.current.version.trim()){
+			var $box = $('<div />').attr('ordering', tstatFw.imageName).addClass('box2').css('width','90%').appendTo( tstatDiv );
+			var $status = $('<strong />').addClass('pull-right').html('Current').appendTo( $box );
+			var $version = $('<h3 />').html(tstatFw.imageName).appendTo( $box );
+			var $added = $('<div />').html('Added: ' + moment(tstatFw.imageUpdateTs).format('MMM DD, YYYY hh:mm A')).appendTo( $box );
+			if(tstat.history.length > 0){
+				$.each(tstat.history, function(hisIndex, tstatHist){
+					if(tstatHist.otaHisPK.imageName.trim() == tstat.current.version.trim()){
+						var $downloaded = $('<div />').html('Downloaded: ' + moment(tstatHist.otaHisPK.imageActivateTs).format('MMM DD, YYYY hh:mm A') + ' by <strong>' + tstatHist.usr + '</strong>').appendTo( $box );
+					}
+				});
+			}
+		}
+	});
+	tstatList.isotope({
+		getSortData: {
+			ordering: '[ordering]'
+		},
+		sortBy: 'ordering',
+		sortAscending: false
+	});
+	
+	if(tstat.history.length > 0){
+		var histH3 = $('<h3 />').addClass('nomarginbottom').html('Wallplate Firmware Download History').appendTo( tstatDiv );
+		var histTable = $('<table />').css('width','94%').addClass('table table-condesed table-bordered table-striped table-hover table-rounded table-sort').appendTo( tstatDiv );
+		var tHead = $('<thead />').append(
+			$('<tr />').append(
+				$('<th data-sort="string" class="sortable" />').html('Version')
+			).append(
+				$('<th data-sort="string" class="sortable" />').html('User')
+			).append(
+				$('<th data-sort="string" class="sortable" />').html('Added')
+			).append(
+				$('<th data-sort="string" class="sortable" />').html('Updated')
+			)
+		).appendTo( histTable );
+		var tBody = $('<tbody />').appendTo( histTable );
+		
+		$.each(tstat.history, function(hisIndex, tstatHist){
+			var $row = $('<tr />').appendTo( tBody );
+			var $version = $('<td />').html( tstatHist.otaHisPK.imageName ).appendTo( $row );
+			var $user = $('<td />').html( tstatHist.usr ).appendTo( $row );
+			var $added = $('<td />').html( moment(tstatHist.imageUpdateTs).format('MMM DD, YYYY hh:mm A') ).appendTo( $row );
+			var $updated = $('<td />').html( moment(tstatHist.otaHisPK.imageActivateTs).format('MMM DD, YYYY hh:mm A') ).appendTo( $row );
+		});
+	}
+}
+
+function buildLcs(){
+	var lcsDiv = $('#lcs');
+	var lcsH3 = $('<h3 />').addClass('nomarginbottom').html('LCS: 26-1910, 26-1912, 26-1914').appendTo( lcsDiv );
+	var lcsList = $('<div />').attr('id', 'lcsList').appendTo( lcsDiv );
+	loading.children('p').html('Building LCS: 26-1910, 26-1912, 26-1914 lists');
+	updateProg();
+	
+	$.each(lcs.available, function(fwIndex, lcsFw){
+		if(firmwareVersionCompare(lcsFw.imageName.trim(), lcs.current.version.trim())){
+			var $box = $('<div />').attr('ordering', lcsFw.imageName).addClass('box').css('width','90%').appendTo( lcsList );
+			var $status = $('<strong />').addClass('pull-right').html('NEW').appendTo( $box );
+			var $version = $('<h3 />').html(lcsFw.imageName).appendTo( $box );
+			var $download = $('<button />').addClass('btn btn-green btn-medium pull-right').html('Update to ' + lcsFw.imageName).click(function(){
+				var sure = confirm('Note! You are starting a firmware upgrade. The process is irreversible, runs overnight and updating all devices can take several days. Proceed only if you want to start the process, otherwise click Cancel. For additional information, please consult the user guide.');
+				
+				if(sure)
+					updateFw(lcs.current.id, lcsFw, 'LCS');
+			}).appendTo( $box );
+			var $added = $('<div />').html('Added: ' + moment(lcsFw.imageUpdateTs).format('MMM DD, YYYY hh:mm A')).appendTo( $box );
+		}else if(lcsFw.imageName.trim() == lcs.current.version.trim()){
+			var $box = $('<div />').attr('ordering', lcsFw.imageName).addClass('box2').css('width','90%').appendTo( lcsList );
+			var $status = $('<strong />').addClass('pull-right').html('Current').appendTo( $box );
+			var $version = $('<h3 />').html(lcsFw.imageName).appendTo( $box );
+			var $added = $('<div />').html('Added: ' + moment(lcsFw.imageUpdateTs).format('MMM DD, YYYY hh:mm A')).appendTo( $box );
+			if(lcs.history.length > 0){
+				$.each(lcs.history, function(hisIndex, lcsHist){
+					if(lcsHist.otaHisPK.imageName.trim() == lcs.current.version.trim()){
+						var $downloaded = $('<div />').html('Downloaded: ' + moment(lcsHist.otaHisPK.imageActivateTs).format('MMM DD, YYYY hh:mm A') + ' by <strong>' + lcsHist.usr + '</strong>').appendTo( $box );
+					}
+				});
+			}
+		}
+	});
+	lcsList.isotope({
+		getSortData: {
+			ordering: '[ordering]'
+		},
+		sortBy: 'ordering',
+		sortAscending: false
+	});
+	if(lcs.history.length > 0){
+		var histH3 = $('<h3 />').addClass('nomarginbottom').html('LCS: 26-1910, 26-1912, 26-1914 Download History').appendTo( lcsDiv );
+		var histTable = $('<table />').css('width','94%').addClass('table table-condesed table-bordered table-striped table-hover table-rounded table-sort').appendTo( lcsDiv );
+		var tHead = $('<thead />').append(
+			$('<tr />').append(
+				$('<th data-sort="string" class="sortable" />').html('Version')
+			).append(
+				$('<th data-sort="string" class="sortable" />').html('User')
+			).append(
+				$('<th data-sort="string" class="sortable" />').html('Added')
+			).append(
+				$('<th data-sort="string" class="sortable" />').html('Updated')
+			)
+		).appendTo( histTable );
+		var tBody = $('<tbody />').appendTo( histTable );
+		
+		$.each(lcs.history, function(hisIndex, lcsHist){
+			var $row = $('<tr />').appendTo( tBody );
+			var $version = $('<td />').html( lcsHist.otaHisPK.imageName ).appendTo( $row );
+			var $user = $('<td />').html( lcsHist.usr ).appendTo( $row );
+			var $added = $('<td />').html( moment(lcsHist.imageUpdateTs).format('MMM DD, YYYY hh:mm A') ).appendTo( $row );
+			var $updated = $('<td />').html( moment(lcsHist.otaHisPK.imageActivateTs).format('MMM DD, YYYY hh:mm A') ).appendTo( $row );
+		});
+	}
+}
+
+function buildMrLcs(){
+	var mrlcsDiv = $('#mrlcs');
+	var mrlcsH3 = $('<h3 />').addClass('nomarginbottom').html('4 Relay LCS Firmware').appendTo( mrlcsDiv );
+	var mrlcsList = $('<div />').attr('id', 'mrlcsList').appendTo( mrlcsDiv );
+	loading.children('p').html('Building 4 Relay LCS Firmware lists');
+	updateProg();
+	
+	$.each(mrlcs.available, function(fwIndex, mrlcsFw){
+		if(firmwareVersionCompare(mrlcsFw.imageName.trim(), mrlcs.current.version.trim())) {
+			var $box = $('<div />').attr('ordering', mrlcsFw.imageName).addClass('box').css('width','90%').appendTo( mrlcsList );
+			var $status = $('<strong />').addClass('pull-right').html('NEW').appendTo( $box );
+			var $version = $('<h3 />').html(mrlcsFw.imageName).appendTo( $box );
+			var $download = $('<button />').addClass('btn btn-green btn-medium pull-right').html('Update to ' + mrlcsFw.imageName).click(function(){
+				var sure = confirm('Note! You are starting a firmware upgrade. The process is irreversible, runs overnight and updating all devices can take several days. Proceed only if you want to start the process, otherwise click Cancel. For additional information, please consult the user guide.');
+				
+				if(sure)
+					updateFw(mrlcs.current.id, mrlcsFw, 'MRLCS');
+			}).appendTo( $box );
+			var $added = $('<div />').html('Added: ' + moment(mrlcsFw.imageUpdateTs).format('MMM DD, YYYY hh:mm A')).appendTo( $box );
+		}else if(mrlcsFw.imageName.trim() == mrlcs.current.version.trim()){
+			var $box = $('<div />').attr('ordering', mrlcsFw.imageName).addClass('box2').css('width','90%').appendTo( mrlcsList );
+			var $status = $('<strong />').addClass('pull-right').html('Current').appendTo( $box );
+			var $version = $('<h3 />').html(mrlcsFw.imageName).appendTo( $box );
+			var $added = $('<div />').html('Added: ' + moment(mrlcsFw.imageUpdateTs).format('MMM DD, YYYY hh:mm A')).appendTo( $box );
+			if(mrlcs.history.length > 0){
+				$.each(mrlcs.history, function(hisIndex, mrlcsHist){
+					if(mrlcsHist.otaHisPK.imageName.trim() == mrlcs.current.version.trim()){
+						var $downloaded = $('<div />').html('Downloaded: ' + moment(mrlcsHist.otaHisPK.imageActivateTs).format('MMM DD, YYYY hh:mm A') + ' by <strong>' + mrlcsHist.usr + '</strong>').appendTo( $box );
+					}
+				});
+			}
+			else {
+				var $downloaded = $('<div />').html('No Downloaded version available').appendTo( $box );
+			}
+		}
+	});
+	
+	mrlcsList.isotope({
+		getSortData: {
+			ordering: function(itemElem) {
+				var imageName ="";
+				var imageValues = itemElem.attributes.ordering.value.split(".");
+				for (var i = 0 ; i<imageValues.length ; i++) {
+					imageName+= ("0" + imageValues[i]).slice(-2);
+				}
+				return imageName;
+			}
+		},
+		sortBy: 'ordering',
+		sortAscending: false,
+		layoutMode: 'vertical'
+	});
+	if(mrlcs.history.length > 0){
+		var histH3 = $('<h3 />').addClass('nomarginbottom').html('4 Relay LCS Firmware Download History').appendTo( mrlcsDiv );
+		var histTable = $('<table />').css('width','94%').addClass('table table-condesed table-bordered table-striped table-hover table-rounded table-sort').appendTo( mrlcsDiv );
+
+/*
+  		var sortedTable = histTable.stupidtable({
+		  "fwVersion": function(a,b) {
+				var aSplit = a.trim().split(".");
+				var bSplit = b.trim().split(".");
+				
+				for(var i=0 ; i<Math.min(aSplit.length, bSplit.length); i++) {
+			        if (parseInt(aSplit[i]) > parseInt(bSplit[i])) {
+			            return a.trim();
+			        }
+				}
+				return b.trim();
+		  }
+		});
+*/
+		
+		var tHead = $('<thead />').append(
+			$('<tr />').append(
+				$('<th data-sort="string" class="sortable" />').html('Version') //data-sort="fwVersion"
+			).append(
+				$('<th data-sort="string" class="sortable" />').html('User')
+			).append(
+				$('<th data-sort="string" class="sortable" />').html('Added')
+			).append(
+				$('<th data-sort="string" class="sortable" />').html('Updated')
+			)
+		).appendTo( histTable );
+		var tBody = $('<tbody />').appendTo( histTable );
+		
+		$.each(mrlcs.history, function(hisIndex, mrlcsHist){
+			var $row = $('<tr />').appendTo( tBody );
+			var $version = $('<td />').html( mrlcsHist.otaHisPK.imageName ).appendTo( $row );
+			var $user = $('<td />').html( mrlcsHist.usr ).appendTo( $row );
+			var $added = $('<td />').html( moment(mrlcsHist.imageUpdateTs).format('MMM DD, YYYY hh:mm A') ).appendTo( $row );
+			var $updated = $('<td />').html( moment(mrlcsHist.otaHisPK.imageActivateTs).format('MMM DD, YYYY hh:mm A') ).appendTo( $row );
+		});
+	} else {
+		var histH3 = $('<h3 />').addClass('nomarginbottom').html('4 Relay LCS Firmware Download History').appendTo( mrlcsDiv );
+		var histH3 = $('<div />').html('No History Available').appendTo( mrlcsDiv );
+
+	}
+}
+
+function firmwareVersionCompare(availableVersion, currentVersion){
+	var availVersionSplit = availableVersion.split(".");
+	var currentVersionSplit = currentVersion.split(".");
+	
+	for(var i=0 ; i<Math.min(availVersionSplit.length, currentVersionSplit.length); i++) {
+        if (parseInt(availVersionSplit[i]) > parseInt(currentVersionSplit[i])) {
+            return true;
+        } else if (parseInt(availVersionSplit[i]) < parseInt(currentVersionSplit[i])) {
+        	return false;
+        }
+	}
+	return false;
+}
+
+
+function updateFw(id, obj, type){
+	var user = {
+		usr: lcs.user
+	}
+	$.extend(obj, user);
+
+	$.ajax({
+		url: (Consert.ctxPath || '' ) + '/json/ota/otaparameters/' + id,
+		type: 'put',
+		data: JSON.stringify(obj),
+		dataType: 'json',
+		contentType: 'application/json',
+		success: function(res){
+			var content = $('<div />');
+			if(res.success){
+				var messgae = $('<p />').addClass('success').html('Update process successfully initiated!').appendTo( content );
+				var text = $('<p />').html(type + ' Firmware version ' + obj.imageName + ' will be downloaded and sent to devices during the next OTA window.<br>Page will refresh when this dialogue is closed.').appendTo( content );
+				$.fancybox({
+					content: content,
+					title: 'Firmware Update Process Complete',
+					afterClose: function(){
+						window.location=window.location;
+					}
+				});
+			}else{
+				var warn = $('<h3 />').html('Unable to update firmware at this time').appendTo( content );
+				var msg = $('<p />').addClass('error').html( res.data ).appendTo( content );
+				$.fancybox({
+					content: content,
+					title: '<strong>Error:</strong> Unable to Update Firmware'
+				});
+			}
+		}
+	});
+}
+
+(function(){
+	loading.html('<p>Initilaizing Firmware imaging system</p>').append( loadingProg );
+	setTimeout(function(){getCurrent()}, 500);
+})();

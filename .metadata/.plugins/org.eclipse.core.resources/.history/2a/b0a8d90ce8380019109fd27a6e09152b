@@ -1,0 +1,73 @@
+package com.gwt.demo.client;
+
+import com.gwt.demo.shared.FieldVerifier;
+import com.google.gwt.core.client.EntryPoint;
+import com.google.gwt.core.client.GWT;
+import com.google.gwt.event.dom.client.ClickEvent;
+import com.google.gwt.event.dom.client.ClickHandler;
+import com.google.gwt.event.dom.client.KeyCodes;
+import com.google.gwt.event.dom.client.KeyUpEvent;
+import com.google.gwt.event.dom.client.KeyUpHandler;
+import com.google.gwt.user.client.rpc.AsyncCallback;
+import com.google.gwt.user.client.ui.Button;
+import com.google.gwt.user.client.ui.DialogBox;
+import com.google.gwt.user.client.ui.Grid;
+import com.google.gwt.user.client.ui.HTML;
+import com.google.gwt.user.client.ui.Label;
+import com.google.gwt.user.client.ui.RootPanel;
+import com.google.gwt.user.client.ui.TextBox;
+import com.google.gwt.user.client.ui.VerticalPanel;
+
+/**
+ * Entry point classes define <code>onModuleLoad()</code>.
+ */
+public class Gwt_demo implements EntryPoint {
+	/**
+	 * The message displayed to the user when the server cannot be reached or
+	 * returns an error.
+	 */
+	private static final String SERVER_ERROR = "An error occurred while "
+			+ "attempting to contact the server. Please check your network " + "connection and try again.";
+
+	
+
+	/**
+	 * This is the entry point method.
+	 */
+	TextBox normalText;
+	public void onModuleLoad() {
+		VerticalPanel vPanel = new VerticalPanel();
+        Label label = new Label(" Enter your Name:  ");
+        this.normalText = new TextBox();
+        vPanel.add(label);
+        vPanel.add(normalText);
+        Button normalButton = new Button();
+        normalButton.setText("Submit");
+        normalButton.addClickHandler(new ClickHandler() {
+			
+			@Override
+			public void onClick(ClickEvent event) {
+				String text = normalText.getText();
+				
+			}
+		});
+        Grid grid = new Grid(2, 2);
+
+            // Add images to the grid
+            int numRows = grid.getRowCount();
+            int numColumns = grid.getColumnCount();
+        /*    for (int row = 0; row < numRows; row++) {
+              for (int col = 0; col < numColumns; col++) {*/
+                grid.setWidget(0, 0, label);
+                grid.setWidget(0, 1, normalText);
+                
+                grid.setWidget(1, 0, new Label(" Submit your Details:  "));
+                grid.setWidget(1, 1, normalButton);
+                
+           /*   }
+            }*/
+                vPanel.add(grid);
+                RootPanel.get().add(vPanel);
+
+	}
+}

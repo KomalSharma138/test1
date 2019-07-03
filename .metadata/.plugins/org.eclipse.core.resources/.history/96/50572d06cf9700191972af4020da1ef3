@@ -1,0 +1,797 @@
+package controllers.json;
+
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.Date;
+import java.util.HashMap;
+import java.util.Hashtable;
+import java.util.List;
+import java.util.Map;
+
+import org.joda.time.DateTime;
+import org.joda.time.LocalDate;
+import org.joda.time.LocalTime;
+
+import models.JsonIncomingProgramTemplateDcTransitionPoint;
+import models.JsonIncomingProgramTemplateProgram;
+import models.JsonIncomingProgramTemplateScheduleRange;
+import models.JsonIncomingProgramTemplateInfo;
+import models.JsonIncomingProgramTemplateTransaction;
+import models.JsonIncomingProgramTemplateTstatTransitionPoint;
+import models.JsonOutgoingProgramTemplateDcTransitionPoint;
+import models.JsonOutgoingProgramTemplateInfo;
+import models.JsonOutgoingProgramTemplateProgram;
+import models.JsonOutgoingProgramTemplateScheduleRange;
+import models.JsonOutgoingProgramTemplateTransaction;
+import models.JsonOutgoingProgramTemplateTstatTransitionPoint;
+
+import com.consert.core.ejb.constant.OpsCenterConstants;
+import com.consert.core.ejb.exception.AbstractOpsCenterException;
+import com.consert.core.ejb.exception.ProgramTemplateException;
+import com.consert.core.ejb.session.interfaces.ProgramTemplateBeanRemote;
+import com.consert.core.ejb.session.interfaces.UserLoginBeanRemote;
+import com.consert.core.model.DeviceTypeModel;
+import com.consert.core.model.ProgramScheduleRangeModel;
+import com.consert.core.model.ProgramTemplateDCTransitionPointModel;
+import com.consert.core.model.ProgramTemplateModel;
+import com.consert.core.model.ProgramTemplateProgramModel;
+import com.consert.core.model.ProgramTemplateScheduleMonthDayModel;
+import com.consert.core.model.ProgramTemplateScheduleRangeModel;
+import com.consert.core.model.ProgramTemplateTstatTransitionPointModel;
+import com.consert.core.model.UserModel;
+import com.consert.service.ns.consertaccountprovisioning.ConsertAccountProvisioningRemote;
+import com.consert.service.ns.xml.ConsertAccountProgramTemplateReMarriage;
+import com.consert.service.ns.xml.ConsertCompoundAccountKey;
+import com.consert.service.ns.xml.ConsertProgramTemplate;
+import com.consert.web.exception.AbstractWebException;
+import com.consert.web.exception.ProgramValidationException;
+import com.consert.web.program.ProgramUtility;
+import com.consert.web.util.CacheUtility;
+import com.consert.web.util.HttpUtility;
+import com.consert.web.util.JsonResponse;
+import com.consert.web.util.SessionBeanFactory;
+import com.google.gson.Gson;
+import com.google.gson.GsonBuilder;
+import com.google.gson.JsonElement;
+import com.google.gson.JsonObject;
+import com.google.gson.JsonParser;
+
+import controllers.ConsertUtilityController;
+import controllers.Secure;
+import com.consert.web.util.ConsertLogger;
+import play.mvc.With;
+
+@With(Secure.class)
+public class JsonProgramTemplate extends ConsertUtilityController {
+	
+	public static void remove(Integer id)
+			throws Exception {
+		if (request.method.equals(HttpUtility.HTTP_GET)) {
+			try {
+				String username = CacheUtility.getSessionConsertUsername();
+				
+				if(id == null || id <= 0) {
+					renderJSON(new JsonResponse(false, null, "Missing or invalid id in remove request"));
+				}
+				else {
+					ProgramTemplateBeanRemote ptEjb = SessionBeanFactory
+							.getProgramTemplateBean();
+					ptEjb.deleteProgramTemplateById(id,username, CacheUtility.getSessionTenantId());
+					
+					renderJSON(new JsonResponse(true, "Program template sucessfully deleted: " + id));
+				}
+			} 
+			catch(AbstractOpsCenterException e) {
+				e.printStackTrace();
+				renderJSON(new JsonResponse(false, null, "Unable to remove program template " + id + ": " + e.getMessage()));
+			}
+			catch (Exception e) {
+				e.printStackTrace();
+				renderJSON(new JsonResponse(false, null, "Unable to remove program template " + id));
+			}
+		} else {
+			renderJSON(new JsonResponse(false, null, "UnsupportedMethod: "
+					+ request.method));
+		}
+	}
+	
+	public static void retrieve(Integer id)
+			throws Exception {
+		if (request.method.equals(HttpUtility.HTTP_GET)) {
+			try {
+				// Get a list of all active Program Templates if no id or a non-positive id is passed
+				if(id == null || id <= 0) {
+					ProgramTemplateBeanRemote ptEjb = SessionBeanFactory
+							.getProgramTemplateBean();
+					List<ProgramTemplateModel> ptModelList = ptEjb.retrieveAllActiveProgramTemplates(CacheUtility.getSessionTenantId());
+					
+					Map<Integer,String> ptIdNameMap = new HashMap<Integer,String>();
+					for(ProgramTemplateModel ptModel:ptModelList) {
+						if(OpsCenterConstants.FALSE.equals(ptModel.getDeleteFlag())) {
+							ptIdNameMap.put(ptModel.getProgramTemplateId(), ptModel.getName());
+						}
+					}
+					
+					renderJSON(new JsonResponse(true, ptIdNameMap));
+				}
+				else {  // Get the id specified in the parameters of the url
+					ProgramTemplateBeanRemote ptEjb = SessionBeanFactory
+							.getProgramTemplateBean();
+					ProgramTemplateModel ptModel = ptEjb.retrieveProgramTemplateById(id, CacheUtility.getSessionTenantId());
+					
+					JsonOutgoingProgramTemplateTransaction joptTransaction = convertProgramTemplateModelToJson(ptModel);
+					
+					renderJSON(new JsonResponse(true, joptTransaction));
+				}
+			} catch (Exception e) {
+				e.printStackTrace();
+				renderJSON(new JsonResponse(false, null, "Unable to retrieve all active program templates: " + e.getMessage()));
+			}
+		} else {
+			renderJSON(new JsonResponse(false, null, "UnsupportedMethod: "
+					+ request.method));
+		}
+	}
+	
+	private static JsonOutgoingProgramTemplateTransaction convertProgramTemplateModelToJson(
+			ProgramTemplateModel ptModel) throws Exception {
+		JsonOutgoingProgramTemplateTransaction joptTransaction = new JsonOutgoingProgramTemplateTransaction();
+		
+		if(ptModel != null) {
+			JsonOutgoingProgramTemplateInfo joptInfo = new JsonOutgoingProgramTemplateInfo();
+			joptInfo.setName(ptModel.getName());
+			joptInfo.setTemplateId(ptModel.getProgramTemplateId());
+						
+			joptTransaction.setTemplate(joptInfo);
+			
+			List<JsonOutgoingProgramTemplateProgram> joptpList = new ArrayList<JsonOutgoingProgramTemplateProgram>();
+			
+			if(ptModel.getProgramTemplateProgramCollection() != null && !ptModel.getProgramTemplateProgramCollection().isEmpty()) {
+				for(ProgramTemplateProgramModel ptpModel:ptModel.getProgramTemplateProgramCollection()) {
+					JsonOutgoingProgramTemplateProgram joptp = new JsonOutgoingProgramTemplateProgram();
+					
+					joptp.setName(ptpModel.getName());
+					joptp.setProgramId(ptpModel.getProgramTemplateProgramId());
+					
+					try {
+						joptp.setSchedByRangeFlag(Integer.parseInt(ptpModel.getSchedByRangeFlag()));
+					}
+					catch(NumberFormatException ex) {
+						throw new ProgramTemplateException("Unable to parse schedule by range flag");
+					}
+					
+					joptp.setProgramScheduleDayMap(getProgramScheduleDayMapFromModel(ptpModel.getProgramTemplateScheduleMonthDayModel()));
+					joptp.setProgramScheduleMonthMap(getProgramScheduleMonthMapFromModel(ptpModel.getProgramTemplateScheduleMonthDayModel()));
+					joptp.setDcTransitionPointCollection(getDcTransitionPointCollectionFromModel(ptpModel.getProgramTemplateDcTransitionPointCollection()));
+					joptp.setTstatTransitionPointCollection(getTstatTransitionPointCollectionFromModel(ptpModel.getProgramTemplateTstatTransitionPointCollection()));
+					joptp.setProgramScheduleRangeCollection(getProgramScheduleRangeFromModel(ptpModel.getProgramTemplateScheduleRangeCollection()));
+					
+					joptpList.add(joptp);
+				}
+				
+				joptTransaction.setPrograms(joptpList);;
+			}
+		}
+			
+		return joptTransaction;
+	}
+
+	private static List<JsonOutgoingProgramTemplateTstatTransitionPoint> getTstatTransitionPointCollectionFromModel(
+		List<ProgramTemplateTstatTransitionPointModel> programTemplateTstatTransitionPointCollection) {
+		
+		List<JsonOutgoingProgramTemplateTstatTransitionPoint> joList = new ArrayList<JsonOutgoingProgramTemplateTstatTransitionPoint>();
+		
+		if(programTemplateTstatTransitionPointCollection != null && !programTemplateTstatTransitionPointCollection.isEmpty()) {
+			for(ProgramTemplateTstatTransitionPointModel tstatTp:programTemplateTstatTransitionPointCollection) {
+				JsonOutgoingProgramTemplateTstatTransitionPoint joTstatTp = new JsonOutgoingProgramTemplateTstatTransitionPoint();
+				
+				joTstatTp.setTpId(tstatTp.getProgramTemplateTstatTransitionPointId());
+				if(tstatTp.getTpTime() != null) {
+					joTstatTp.setTpTime(tstatTp.getTpTime().toString());
+				}
+				joTstatTp.setPrefCoolTemp(tstatTp.getPrefCoolTemp());
+				joTstatTp.setPrefHeatTemp(tstatTp.getPrefHeatTemp());
+				joTstatTp.setOpModeId(tstatTp.getOpModeId());
+				joTstatTp.setOpModeName(tstatTp.getOpModeName());
+				joTstatTp.setMaxTemp(tstatTp.getMaxTemp());
+				joTstatTp.setMinTemp(tstatTp.getMinTemp());
+					
+				joList.add(joTstatTp);
+			}
+		}
+		
+		return joList;
+	}
+
+	private static List<JsonOutgoingProgramTemplateDcTransitionPoint> getDcTransitionPointCollectionFromModel(
+		List<ProgramTemplateDCTransitionPointModel> programTemplateDcTransitionPointCollection) throws Exception {
+		
+		List<JsonOutgoingProgramTemplateDcTransitionPoint> joptDcTpList = new ArrayList<JsonOutgoingProgramTemplateDcTransitionPoint>();
+		
+		if(programTemplateDcTransitionPointCollection != null && !programTemplateDcTransitionPointCollection.isEmpty()) {
+			for(ProgramTemplateDCTransitionPointModel dcTpModel:programTemplateDcTransitionPointCollection) {
+				
+				JsonOutgoingProgramTemplateDcTransitionPoint joDcTp = new JsonOutgoingProgramTemplateDcTransitionPoint();
+				
+				joDcTp.setTpId(dcTpModel.getProgramTemplateDCTransitionPointId());
+				if(dcTpModel.getTpTime() != null) {
+					joDcTp.setTpTime(dcTpModel.getTpTime().toString());
+				}
+				
+				try {
+					joDcTp.setPowerStatusFlag(Integer.parseInt(dcTpModel.getPowerStatusFlag()));
+				}
+				catch(NumberFormatException ex) {
+					throw new ProgramTemplateException("Unable to parse power status flag");
+				}
+				
+				if(dcTpModel.getDeviceType() != null) {
+					joDcTp.setDeviceTypeName(dcTpModel.getDeviceType().getDeviceTypeName());
+					joDcTp.setDeviceTypeId(dcTpModel.getDeviceType().getDeviceTypeId());
+				}
+				
+				joptDcTpList.add(joDcTp);
+			}
+		}
+		
+		return joptDcTpList;
+	}
+	
+	private static List<JsonOutgoingProgramTemplateScheduleRange> getProgramScheduleRangeFromModel(
+			List<ProgramTemplateScheduleRangeModel> programTemplateScheduleRangeCollection) {
+			
+			List<JsonOutgoingProgramTemplateScheduleRange> joptDcTpList = new ArrayList<JsonOutgoingProgramTemplateScheduleRange>();
+			
+			if(programTemplateScheduleRangeCollection != null && !programTemplateScheduleRangeCollection.isEmpty()) {
+				for(ProgramTemplateScheduleRangeModel dcTpModel : programTemplateScheduleRangeCollection) {
+					
+					JsonOutgoingProgramTemplateScheduleRange joDcTp = new JsonOutgoingProgramTemplateScheduleRange();
+					
+					joDcTp.setStartDate(dcTpModel.getStartDate().toString());				
+					joDcTp.setEndDate(dcTpModel.getEndDate().toString());
+					joptDcTpList.add(joDcTp);
+				}
+			}
+			
+			return joptDcTpList;
+		}
+
+	private static Map<String, String> getProgramScheduleMonthMapFromModel(
+		ProgramTemplateScheduleMonthDayModel programTemplateScheduleMonthDayModel) {
+		
+		Map<String,String> psmMap = new HashMap<String,String>();
+		
+		if(programTemplateScheduleMonthDayModel != null) {
+			psmMap.put("0",programTemplateScheduleMonthDayModel.getJan());
+			psmMap.put("1",programTemplateScheduleMonthDayModel.getFeb());
+			psmMap.put("2",programTemplateScheduleMonthDayModel.getMar());
+			psmMap.put("3",programTemplateScheduleMonthDayModel.getApr());
+			psmMap.put("4",programTemplateScheduleMonthDayModel.getMay());
+			psmMap.put("5",programTemplateScheduleMonthDayModel.getJun());
+			psmMap.put("6",programTemplateScheduleMonthDayModel.getJul());
+			psmMap.put("7",programTemplateScheduleMonthDayModel.getAug());
+			psmMap.put("8",programTemplateScheduleMonthDayModel.getSep());
+			psmMap.put("9",programTemplateScheduleMonthDayModel.getOct());
+			psmMap.put("10",programTemplateScheduleMonthDayModel.getNov());
+			psmMap.put("11",programTemplateScheduleMonthDayModel.getDec());
+		}
+		
+		return psmMap;
+	}
+
+	private static Map<String, String> getProgramScheduleDayMapFromModel(
+		ProgramTemplateScheduleMonthDayModel programTemplateScheduleMonthDayModel) {
+
+		Map<String,String> psdMap = new HashMap<String,String>();
+		
+		if(programTemplateScheduleMonthDayModel != null) {
+			// Used in retrieve - adheres to OpsCenter days:
+				// 0 = Saturday, 1 = Sunday, ...
+			psdMap.put("0",programTemplateScheduleMonthDayModel.getSat());
+			psdMap.put("1",programTemplateScheduleMonthDayModel.getSun());
+			psdMap.put("2",programTemplateScheduleMonthDayModel.getMon());
+			psdMap.put("3",programTemplateScheduleMonthDayModel.getTue());
+			psdMap.put("4",programTemplateScheduleMonthDayModel.getWed());
+			psdMap.put("5",programTemplateScheduleMonthDayModel.getThu());
+			psdMap.put("6",programTemplateScheduleMonthDayModel.getFri());
+		}
+		
+		return psdMap;
+	}
+
+	public static void create(String data)
+			throws Exception {
+		if (request.method.equals(HttpUtility.HTTP_POST)) {
+			if (data == null) {
+				renderJSON(new JsonResponse(false, null,
+						"Required POST Form Element: data"));
+			} else {
+				try {	
+					handleCreate(data);
+				}
+				catch(AbstractOpsCenterException e) {
+					e.printStackTrace();
+					renderJSON(new JsonResponse(false, null, "Unable to create program template: " + e.getMessage()));
+				}
+				catch(Exception e) {
+					e.printStackTrace();
+					renderJSON(new JsonResponse(false, null, "Unable to create program template"));
+				}
+			}
+		} else {
+			renderJSON(new JsonResponse(false, null, "UnsupportedMethod: "
+					+ request.method));
+		}
+	}
+	
+	public static void reapplyTemplate(String data)
+			throws Exception {
+		if (request.method.equals(HttpUtility.HTTP_POST)) {
+			if (data == null) {
+				renderJSON(new JsonResponse(false, null,
+						"Required POST Form Element: data"));
+			} else {
+				try {
+					JsonParser parser = new JsonParser();
+					JsonElement jsonEle = parser.parse(data);
+					JsonObject jsonObj = jsonEle.getAsJsonObject();					
+					JsonElement tempconsertId = jsonObj.get("consertId");
+					JsonElement templateId = jsonObj.get("newProgramTemplate");
+					
+					Integer programTemplateId = templateId.getAsInt();
+					Long consertId = tempconsertId.getAsLong();
+					
+					
+					ConsertAccountProvisioningRemote provBean = SessionBeanFactory
+							.getConsertAccountProvisioningBean();
+					
+					ConsertAccountProgramTemplateReMarriage conAccPrgTmplMarriage = new ConsertAccountProgramTemplateReMarriage();
+					
+					ConsertCompoundAccountKey conCompAccKey = new ConsertCompoundAccountKey();
+					conCompAccKey.setConsertId(consertId);
+					
+					ConsertProgramTemplate conprgmTemplate = new ConsertProgramTemplate();
+					conprgmTemplate.setProgramTemplateId(programTemplateId);
+					
+					conAccPrgTmplMarriage.setCompoundAccountKey(conCompAccKey);
+					conAccPrgTmplMarriage.setNewProgramTemplate(conprgmTemplate);
+					
+					provBean.accountChangeProgramTemplate(conAccPrgTmplMarriage, CacheUtility.getSessionTenantId());
+					
+					//Code goes here
+				}
+//				catch(AbstractOpsCenterException e) {
+//					e.printStackTrace();
+//					renderJSON(new JsonResponse(false, null, "Unable to reapply program template: " + e.getMessage()));
+//				}
+				catch(Exception e) {
+					e.printStackTrace();
+					renderJSON(new JsonResponse(false, null, "Unable to reapply program template"));
+				}
+			}
+		} else {
+			renderJSON(new JsonResponse(false, null, "UnsupportedMethod: "
+					+ request.method));
+		}
+	}
+
+	protected static void handleCreate(String data) throws Exception {
+		try {
+			// Parse incoming JSON Object into Java Model
+			GsonBuilder gsonb = new GsonBuilder();
+			Gson gson = gsonb.create();
+
+			JsonIncomingProgramTemplateTransaction ptTransaction = gson.fromJson(
+					data, JsonIncomingProgramTemplateTransaction.class);
+
+			ProgramTemplateModel ptModel = convertJsonToProgramTemplateModel(ptTransaction);
+			
+			ProgramTemplateBeanRemote ptEjb = SessionBeanFactory
+					.getProgramTemplateBean();
+			ptEjb.saveProgramTemplate(ptModel, CacheUtility.getSessionTenantId());
+			
+			renderJSON(new JsonResponse(true, "Successfully created program template!"));
+		} catch (Exception e) {
+			throw e;
+		}
+	}
+
+	private static ProgramTemplateModel convertJsonToProgramTemplateModel(
+			JsonIncomingProgramTemplateTransaction ptTransaction) throws Exception {
+		String username = CacheUtility.getSessionConsertUsername();;
+
+		ProgramTemplateModel ptModel = new ProgramTemplateModel();
+
+		JsonIncomingProgramTemplateInfo templateInfo = ptTransaction.getTemplate();
+
+		// Apply json template info to ptModel
+		if (templateInfo != null) {
+			if(templateInfo.getName() != null) {
+				if(templateInfo.getName().trim().isEmpty()) {
+					throw new ProgramTemplateException("ProgramTemplate name must contain characters.");
+				}
+				else {
+					ptModel.setName(templateInfo.getName().trim());
+				}
+			}
+			if(templateInfo.getTemplateId() != null) {
+				ptModel.setProgramTemplateId(templateInfo.getTemplateId());
+			}
+			else {
+				throw new Exception("Incoming Json object does not contain a program template id.");
+			}
+		}
+
+		// Manually set template info parameters
+		ptModel.setUserModified(username);
+		ptModel.setDateModified(new DateTime());
+		ptModel.setUserCreated(username);
+		ptModel.setDateCreated(new DateTime());
+		ptModel.setDeleteFlag(OpsCenterConstants.FALSE);
+
+		try {
+			// Process created array
+			if (ptTransaction.getCreated() != null
+					&& !ptTransaction.getCreated().isEmpty()) {
+				applyCreatedProgramListToModel(ptModel, ptTransaction.getCreated(),
+						username);
+			}
+
+			// Process updated array
+			if (ptTransaction.getUpdated() != null
+					&& !ptTransaction.getUpdated().isEmpty()) {
+				applyUpdatedProgramListToModel(ptModel, ptTransaction.getUpdated(),
+						username);
+			}
+
+			// Process removed array
+			if (ptTransaction.getRemoved() != null
+					&& !ptTransaction.getRemoved().isEmpty()) {
+				applyRemovedProgramListToModel(ptModel, ptTransaction.getRemoved(),
+						username);
+			}
+		} catch (Exception e) {
+			throw e;
+		}
+
+		return ptModel;
+	}
+
+	private static void applyCreatedProgramListToModel(
+			ProgramTemplateModel ptModel,
+			List<JsonIncomingProgramTemplateProgram> createdList, String username) throws Exception {
+		List<ProgramTemplateProgramModel> ptpList = new ArrayList<ProgramTemplateProgramModel>();
+		for (JsonIncomingProgramTemplateProgram jiCreatedProgram : createdList) {
+			ProgramTemplateProgramModel ptpModel = new ProgramTemplateProgramModel();
+
+			// Copy over value for JsonIncoming object to ptModel
+			ptpModel.setName(jiCreatedProgram.getName());
+			ptpModel.setSchedByRangeFlag(""
+					+ jiCreatedProgram.getSchedByRangeFlag());
+			ptpModel.setProgramTemplateDcTransitionPointCollection(getProgramTemplateDcTransitionPointCollection(
+					jiCreatedProgram.getDcTransitionPointCollection(), username));
+			ptpModel.setProgramTemplateTstatTransitionPointCollection(getProgramTemplateTstatTransitionPointCollection(
+					jiCreatedProgram.getTstatTransitionPointCollection(),
+					username));
+			ptpModel.setProgramTemplateScheduleMonthDayModel(getProgramTemplateScheduleMonthDayModel(
+					jiCreatedProgram.getProgramScheduleMonthMap(),
+					jiCreatedProgram.getProgramScheduleDayMap(),
+					jiCreatedProgram.getSchedByRangeFlag(), username,ptpModel.getProgramTemplateProgramId()));
+			ptpModel.setProgramTemplateScheduleRangeCollection(getProgramTemplateScheduleRangeModel(jiCreatedProgram.getProgramScheduleRangeCollection(),
+	            		username));
+			
+			// Manually apply parameters
+			ptpModel.setUserModified(username);
+			ptpModel.setDateModified(new DateTime());
+			ptpModel.setUserCreated(username);
+			ptpModel.setDateCreated(new DateTime());
+			
+			ptpModel.setProgramTemplateProgramState(OpsCenterConstants.PROGRAM_STATE_CREATED);
+
+			ptpList.add(ptpModel);
+		}
+		
+		//If there are ptp's already mapped to the pt, then add them to the list
+		if (null != ptModel.getProgramTemplateProgramCollection() && 0 < ptModel.getProgramTemplateProgramCollection().size())
+		{
+			ptModel.getProgramTemplateProgramCollection().addAll(ptpList);
+		}
+		else
+		{
+			ptModel.setProgramTemplateProgramCollection(ptpList);
+		}
+	}
+
+	private static void applyUpdatedProgramListToModel(
+			ProgramTemplateModel ptModel,
+			List<JsonIncomingProgramTemplateProgram> updatedList, String username) throws Exception {
+		List<ProgramTemplateProgramModel> ptpList = new ArrayList<ProgramTemplateProgramModel>();
+		for (JsonIncomingProgramTemplateProgram jiUpdatedProgram : updatedList) {
+			ProgramTemplateProgramModel ptpModel = new ProgramTemplateProgramModel();
+
+			// Copy over value for JsonIncoming object to ptModel
+			ptpModel.setProgramTemplateProgramId(jiUpdatedProgram.getProgramId());
+			ptpModel.setName(jiUpdatedProgram.getName());
+			ptpModel.setSchedByRangeFlag(""
+					+ jiUpdatedProgram.getSchedByRangeFlag());
+			ptpModel.setProgramTemplateDcTransitionPointCollection(getProgramTemplateDcTransitionPointCollection(
+					jiUpdatedProgram.getDcTransitionPointCollection(), username));
+			ptpModel.setProgramTemplateTstatTransitionPointCollection(getProgramTemplateTstatTransitionPointCollection(
+					jiUpdatedProgram.getTstatTransitionPointCollection(),
+					username));
+			ptpModel.setProgramTemplateScheduleMonthDayModel(getProgramTemplateScheduleMonthDayModel(
+					jiUpdatedProgram.getProgramScheduleMonthMap(),
+					jiUpdatedProgram.getProgramScheduleDayMap(),
+					jiUpdatedProgram.getSchedByRangeFlag(), username,ptpModel.getProgramTemplateProgramId()));
+            ptpModel.setProgramTemplateScheduleRangeCollection(getProgramTemplateScheduleRangeModel(jiUpdatedProgram.getProgramScheduleRangeCollection(),
+            		username));
+			// Manually apply parameters
+			ptpModel.setUserModified(username);
+			ptpModel.setDateModified(new DateTime());
+			
+			ptpModel.setProgramTemplateProgramState(OpsCenterConstants.PROGRAM_STATE_UPDATED);
+
+			ptpList.add(ptpModel);
+		}
+		//If there are ptp's already mapped to the pt, then add them to the list
+		if (null != ptModel.getProgramTemplateProgramCollection() && 0 < ptModel.getProgramTemplateProgramCollection().size())
+		{
+			ptModel.getProgramTemplateProgramCollection().addAll(ptpList);
+		}
+		else
+		{
+			ptModel.setProgramTemplateProgramCollection(ptpList);
+		}
+	}
+
+
+	private static void applyRemovedProgramListToModel(
+			ProgramTemplateModel ptModel,
+			List<JsonIncomingProgramTemplateProgram> removedList, String username) {
+		List<ProgramTemplateProgramModel> ptpList = new ArrayList<ProgramTemplateProgramModel>();
+		for (JsonIncomingProgramTemplateProgram jiRemovedProgram : removedList) {
+			ProgramTemplateProgramModel ptpModel = new ProgramTemplateProgramModel();
+
+			ptpModel.setProgramTemplateProgramId(jiRemovedProgram.getProgramId());
+			
+			ptpModel.setProgramTemplateProgramState(OpsCenterConstants.PROGRAM_STATE_REMOVED);
+
+			ptpList.add(ptpModel);
+		}
+		//If there are ptp's already mapped to the pt, then add them to the list
+		if (null != ptModel.getProgramTemplateProgramCollection() && 0 < ptModel.getProgramTemplateProgramCollection().size())
+		{
+			ptModel.getProgramTemplateProgramCollection().addAll(ptpList);
+		}
+		else
+		{
+			ptModel.setProgramTemplateProgramCollection(ptpList);
+		}
+	}
+
+	private static ProgramTemplateScheduleMonthDayModel getProgramTemplateScheduleMonthDayModel(
+			Map<String, String> programScheduleMonthMap,
+			Map<String, String> programScheduleDayMap,
+			Integer schedByRangeFlag,String username,Integer ptProgramId) {
+		ProgramTemplateScheduleMonthDayModel ptsmdModel = new ProgramTemplateScheduleMonthDayModel();
+		
+		if(schedByRangeFlag == 0) {
+			if(programScheduleMonthMap != null) {
+				ptsmdModel.setJan(programScheduleMonthMap.get("0"));
+				ptsmdModel.setFeb(programScheduleMonthMap.get("1"));
+				ptsmdModel.setMar(programScheduleMonthMap.get("2");
+				ptsmdModel.setApr(programScheduleMonthMap.get("3"));
+				ptsmdModel.setMay(programScheduleMonthMap.get("4"));
+				ptsmdModel.setJun(programScheduleMonthMap.get("5"));
+				ptsmdModel.setJul(programScheduleMonthMap.get("6"));
+				ptsmdModel.setAug(programScheduleMonthMap.get("7"));
+				ptsmdModel.setSep(programScheduleMonthMap.get("8"));
+				ptsmdModel.setOct(programScheduleMonthMap.get("9"));
+				ptsmdModel.setNov(programScheduleMonthMap.get("10"));
+				ptsmdModel.setDec(programScheduleMonthMap.get("11"));
+			}
+			
+			if(programScheduleDayMap != null) {
+				
+				// Used in create and update 
+				// - Rearranged to agree with UI days 0 = Sunday, ..., 6 = Saturday
+				ptsmdModel.setSat(programScheduleDayMap.get("6"));
+				ptsmdModel.setSun(programScheduleDayMap.get("0"));
+				ptsmdModel.setMon(programScheduleDayMap.get("1"));
+				ptsmdModel.setTue(programScheduleDayMap.get("2"));
+				ptsmdModel.setWed(programScheduleDayMap.get("3"));
+				ptsmdModel.setThu(programScheduleDayMap.get("4"));
+				ptsmdModel.setFri(programScheduleDayMap.get("5"));
+			}
+		}
+		else {
+			ptsmdModel.setJan("0");
+			ptsmdModel.setFeb("0");
+			ptsmdModel.setMar("0");
+			ptsmdModel.setApr("0");
+			ptsmdModel.setMay("0");
+			ptsmdModel.setJun("0");
+			ptsmdModel.setJul("0");
+			ptsmdModel.setAug("0");
+			ptsmdModel.setSep("0");
+			ptsmdModel.setOct("0");
+			ptsmdModel.setNov("0");
+			ptsmdModel.setDec("0");
+
+			ptsmdModel.setSun("0");
+			ptsmdModel.setMon("0");
+			ptsmdModel.setTue("0");
+			ptsmdModel.setWed("0");
+			ptsmdModel.setThu("0");
+			ptsmdModel.setFri("0");
+			ptsmdModel.setSat("0");
+		}
+		
+		// Manually set ProgramTemplateScheduleMonthDayModel
+		ptsmdModel.setUserCreated(username);
+		ptsmdModel.setDateCreated(new DateTime());
+		ptsmdModel.setUserModified(username);
+		ptsmdModel.setDateModified(new DateTime());
+		
+		return ptsmdModel;
+	}
+	
+	private static List<ProgramTemplateScheduleRangeModel> getProgramTemplateScheduleRangeModel(
+			List<JsonIncomingProgramTemplateScheduleRange> jsonIncomingProgramTemplateScheduleRange, String username) {
+		
+		List<ProgramTemplateScheduleRangeModel> ptmSchdRanModel = new ArrayList<ProgramTemplateScheduleRangeModel>();
+		if(jsonIncomingProgramTemplateScheduleRange != null && !jsonIncomingProgramTemplateScheduleRange.isEmpty())
+		{
+			for(JsonIncomingProgramTemplateScheduleRange jptsrm : jsonIncomingProgramTemplateScheduleRange)
+			{
+			ProgramTemplateScheduleRangeModel ptsrm = new ProgramTemplateScheduleRangeModel();
+			ptsrm.setStartDate(new LocalDate(jptsrm.getStartDate()));
+			ptsrm.setEndDate(new LocalDate(jptsrm.getEndDate()));
+			ptsrm.setUserModified(username);
+			ptsrm.setDateModified(new DateTime());
+			ptsrm.setUserCreated(username);
+			ptsrm.setDateCreated(new DateTime());
+			
+			ptmSchdRanModel.add(ptsrm);
+			}
+		}
+		return ptmSchdRanModel;
+	}
+
+	private static List<ProgramTemplateTstatTransitionPointModel> getProgramTemplateTstatTransitionPointCollection(
+			List<JsonIncomingProgramTemplateTstatTransitionPoint> jiTstatTransitionPointCollection,
+			String username) {
+		List<ProgramTemplateTstatTransitionPointModel> tstatTpModelList = new ArrayList<ProgramTemplateTstatTransitionPointModel>();
+		
+		if(jiTstatTransitionPointCollection != null && !jiTstatTransitionPointCollection.isEmpty()) {
+			for(JsonIncomingProgramTemplateTstatTransitionPoint jittp : jiTstatTransitionPointCollection) {
+				ProgramTemplateTstatTransitionPointModel ttpModel = new ProgramTemplateTstatTransitionPointModel();
+				
+				ttpModel.setProgramTemplateTstatTransitionPointId(jittp.getTpId());
+				ttpModel.setTpTime(new LocalTime(jittp.getTpTime()));
+				ttpModel.setPrefHeatTemp(jittp.getPrefHeatTemp());
+				ttpModel.setPrefCoolTemp(jittp.getPrefCoolTemp());
+				ttpModel.setOpModeId(jittp.getOpModeId());
+				ttpModel.setOpModeName(jittp.getOpModeName());
+				ttpModel.setMaxTemp(jittp.getMaxTemp());
+				ttpModel.setMinTemp(jittp.getMinTemp());
+				
+				ttpModel.setUserModified(username);
+				ttpModel.setDateModified(new DateTime());
+				ttpModel.setUserCreated(username);
+				ttpModel.setDateCreated(new DateTime());
+				
+				tstatTpModelList.add(ttpModel);
+			}
+		}
+		
+		return tstatTpModelList;
+	}
+
+	private static List<ProgramTemplateDCTransitionPointModel> getProgramTemplateDcTransitionPointCollection(
+			List<JsonIncomingProgramTemplateDcTransitionPoint> jiPtDcTpList,
+			String username) throws Exception {
+		List<ProgramTemplateDCTransitionPointModel> ptDcTpList = new ArrayList<ProgramTemplateDCTransitionPointModel>();
+		
+		if(jiPtDcTpList != null && !jiPtDcTpList.isEmpty()) {
+			for(JsonIncomingProgramTemplateDcTransitionPoint jiPtDcTp:jiPtDcTpList) {
+				ProgramTemplateDCTransitionPointModel ptDcTpModel = new ProgramTemplateDCTransitionPointModel();
+				
+				ptDcTpModel.setProgramTemplateDCTransitionPointId(jiPtDcTp.getTpId());
+				ptDcTpModel.setTpTime(new LocalTime(jiPtDcTp.getTpTime()));
+				ptDcTpModel.setPowerStatusFlag(""+jiPtDcTp.getPowerStatusFlag());
+				
+				DeviceTypeModel dtModel;
+				
+				if(OpsCenterConstants.deviceNameToTypeMap.get(jiPtDcTp.getName()) != null) {
+					dtModel = new DeviceTypeModel(OpsCenterConstants.deviceNameToTypeMap.get(jiPtDcTp.getName()),
+							jiPtDcTp.getName());	
+				}
+				else {
+					throw new Exception("Unknown device type encountered on transition point: " + jiPtDcTp.getName());
+				}
+				
+				ptDcTpModel.setDeviceType(dtModel);
+				
+				ptDcTpModel.setUserModified(username);
+				ptDcTpModel.setDateModified(new DateTime());
+				ptDcTpModel.setUserCreated(username);
+				ptDcTpModel.setDateCreated(new DateTime());
+				
+				ptDcTpList.add(ptDcTpModel);
+			}
+		}
+		
+		return ptDcTpList;
+	}
+	
+	public static void update(String data)
+			throws Exception {
+		if (request.method.equals(HttpUtility.HTTP_POST)) {
+			if (data == null) {
+				renderJSON(new JsonResponse(false, null,
+						"Required POST Form Element: data"));
+			} else {
+				try {	
+					handleUpdate(data);
+				}
+				catch(AbstractOpsCenterException e) {
+					e.printStackTrace();
+					renderJSON(new JsonResponse(false, null, "Unable to update program template: " + e.getMessage()));
+				}
+				catch(Exception e) {
+					e.printStackTrace();
+					renderJSON(new JsonResponse(false, null, "Unable to update program template"));
+				}
+			}
+		} else {
+			renderJSON(new JsonResponse(false, null, "UnsupportedMethod: "
+					+ request.method));
+		}
+	}
+	
+	protected static void handleUpdate(String data) throws Exception {
+		try {
+			// Parse incoming JSON Object into Java Model
+			GsonBuilder gsonb = new GsonBuilder();
+			Gson gson = gsonb.create();
+
+			JsonIncomingProgramTemplateTransaction ptTransaction = gson.fromJson(
+					data, JsonIncomingProgramTemplateTransaction.class);
+
+			ProgramTemplateModel ptModel = convertJsonToProgramTemplateModel(ptTransaction);
+			
+			List<ProgramTemplateProgramModel> newPtpModels = new ArrayList<ProgramTemplateProgramModel>();
+			List<ProgramTemplateProgramModel> updatedPtpModels = new ArrayList<ProgramTemplateProgramModel>();
+			List<Integer> deletedPtpIds = new ArrayList<Integer>();
+			
+			if(ptModel.getProgramTemplateProgramCollection() != null 
+					&& !ptModel.getProgramTemplateProgramCollection().isEmpty()) {
+				for(ProgramTemplateProgramModel ptp:ptModel.getProgramTemplateProgramCollection()) {
+					if(ptp.getProgramTemplateProgramState() != (OpsCenterConstants.PROGRAM_STATE_UNASSIGNED)) {
+						if(ptp.getProgramTemplateProgramState() == (OpsCenterConstants.PROGRAM_STATE_CREATED)) {
+							newPtpModels.add(ptp);
+						}
+						
+						if(ptp.getProgramTemplateProgramState() == (OpsCenterConstants.PROGRAM_STATE_UPDATED)) {
+							updatedPtpModels.add(ptp);
+						}
+						
+						if(ptp.getProgramTemplateProgramState() == (OpsCenterConstants.PROGRAM_STATE_REMOVED)) {
+							deletedPtpIds.add(ptp.getProgramTemplateProgramId());
+						}
+					}
+				}
+			}
+			
+
+			ProgramTemplateBeanRemote ptEjb = SessionBeanFactory
+					.getProgramTemplateBean();
+			ptEjb.updateProgramTemplate(ptModel, newPtpModels, updatedPtpModels, deletedPtpIds, CacheUtility.getSessionTenantId());
+			
+			renderJSON(new JsonResponse(true, "Successfully updated program template!"));
+		} catch (Exception e) {
+			throw e;
+		}
+	}
+}

@@ -1,0 +1,63 @@
+/**
+ * 
+ */
+package com.consert.core.ejb.session.facade.interfaces;
+
+import java.util.List;
+
+import javax.ejb.Local;
+
+import com.consert.core.entities.ProgramTemplate;
+import com.consert.core.entities.ProgramTemplateDcTransitionPoint;
+import com.consert.core.entities.ProgramTemplateProgram;
+import com.consert.core.entities.ProgramTemplateScheduleMonthDay;
+import com.consert.core.entities.ProgramTemplateScheduleRange;
+import com.consert.core.entities.ProgramTemplateTstatTransitionPoint;
+
+/**
+ * @author Newj
+ *
+ */
+@Local
+public interface ProgramTemplateFacadeLocal {
+	
+
+	public ProgramTemplate createProgramTemplate(ProgramTemplate programTemplate) throws Exception;
+
+	public ProgramTemplateProgram createProgramTemplateProgram(ProgramTemplateProgram programTemplateProgram) throws Exception;
+
+	public ProgramTemplateScheduleMonthDay createProgramTemplateScheduleMonthDay(ProgramTemplateScheduleMonthDay programTemplateScheduleMonthDay) throws Exception;
+
+	public ProgramTemplateTstatTransitionPoint createProgramTemplateTstatTransitionPoint(ProgramTemplateTstatTransitionPoint programTemplateTstatTransitionPoint) throws Exception;
+
+	public ProgramTemplateDcTransitionPoint createProgramTemplateDcTransitionPoint(ProgramTemplateDcTransitionPoint programTemplateDcTransitionPoint) throws Exception;
+
+	public List<ProgramTemplate> getProgramTemplates();
+
+	public ProgramTemplate findProgramTemplateById(int ptId);
+
+	public ProgramTemplate updateProgramTemplate(ProgramTemplate programTemplate) throws Exception;
+
+	public List<ProgramTemplate> getActiveProgramTemplates();
+
+	public ProgramTemplate getActiveProgramTemplateById(int ptId);
+
+	public ProgramTemplateProgram updateProgramTemplateProgram(ProgramTemplateProgram programTemplateProgram) throws Exception;
+
+	public boolean removeProgramTemplateProgramByIds(List<Integer> ptpIds) throws Exception;
+
+	public void removeTstatTransitionPoint(ProgramTemplateTstatTransitionPoint tpEntity) throws Exception;
+
+	public void removeDcTransitionPoint(ProgramTemplateDcTransitionPoint dcEntity) throws Exception;
+
+	public ProgramTemplateProgram findProgramTemplateProgramById(int ptpId);
+
+	public List<ProgramTemplate> getActiveProgramTemplatesByName(String ptName);
+
+	public ProgramTemplateScheduleRange createProgramTemplateScheduleRange(
+			ProgramTemplateScheduleRange programTemplateScheduleRange) throws Exception;
+
+	public void removeProgramScheduleRange(ProgramTemplateScheduleRange schEntity) throws Exception;
+	
+
+}

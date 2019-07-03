@@ -1,0 +1,109 @@
+package models;
+
+import java.io.Serializable;
+import java.util.List;
+import java.util.Map;
+
+public class JsonOutgoingProgramTemplateProgram extends JsonUtilityObject
+{
+	private static final long serialVersionUID = 430769234665205967L;
+
+	private Integer programId;
+
+	private String name;
+	private Integer schedByRangeFlag;
+	private Map<String, Integer> programScheduleMonthMap;
+	private Map<String, String> programScheduleDayMap;
+	private List<JsonOutgoingProgramTemplateDcTransitionPoint> dcTransitionPointCollection;
+	private List<JsonOutgoingProgramTemplateTstatTransitionPoint> tstatTransitionPointCollection;
+	private List<JsonOutgoingProgramTemplateScheduleRange> programScheduleRangeCollection;
+
+	public JsonOutgoingProgramTemplateProgram()
+	{
+	}
+
+	public List<JsonOutgoingProgramTemplateDcTransitionPoint> getDcTransitionPointCollection()
+	{
+		return dcTransitionPointCollection;
+	}
+
+	public String getName()
+	{
+		return name;
+	}
+
+	public Integer getProgramId()
+	{
+		return programId;
+	}
+
+	public Map<String, String> getProgramScheduleDayMap()
+	{
+		return programScheduleDayMap;
+	}
+
+
+	public Map<String, Integer> getProgramScheduleMonthMap()
+	{
+		return programScheduleMonthMap;
+	}
+
+	public Integer getSchedByRangeFlag()
+	{
+		return schedByRangeFlag;
+	}
+
+	public List<JsonOutgoingProgramTemplateTstatTransitionPoint> getTstatTransitionPointCollection()
+	{
+		return tstatTransitionPointCollection;
+	}
+
+	public void setDcTransitionPointCollection(
+			List<JsonOutgoingProgramTemplateDcTransitionPoint> dcTransitionPointCollection)
+	{
+		this.dcTransitionPointCollection = dcTransitionPointCollection;
+	}
+
+	public void setName(String name)
+	{
+		this.name = name;
+	}
+
+	public void setProgramId(Integer programId)
+	{
+		this.programId = programId;
+	}
+
+	public void setProgramScheduleDayMap(Map<String, String> programScheduleDayMap)
+	{
+		this.programScheduleDayMap = programScheduleDayMap;
+	}
+
+	public void setProgramScheduleMonthMap(
+			Map<String, Integer> programScheduleMonthMap)
+	{
+		this.programScheduleMonthMap = programScheduleMonthMap;
+	}
+
+	public void setSchedByRangeFlag(Integer schedByRangeFlag)
+	{
+		this.schedByRangeFlag = schedByRangeFlag;
+	}
+
+	public void setTstatTransitionPointCollection(
+			List<JsonOutgoingProgramTemplateTstatTransitionPoint> tstatTransitionPointCollection)
+	{
+		this.tstatTransitionPointCollection = tstatTransitionPointCollection;
+	}
+
+	public List<JsonOutgoingProgramTemplateScheduleRange> getProgramScheduleRangeCollection() {
+		return programScheduleRangeCollection;
+	}
+
+	public void setProgramScheduleRangeCollection(
+			List<JsonOutgoingProgramTemplateScheduleRange> programScheduleRangeCollection) {
+		this.programScheduleRangeCollection = programScheduleRangeCollection;
+	}
+	
+	
+}

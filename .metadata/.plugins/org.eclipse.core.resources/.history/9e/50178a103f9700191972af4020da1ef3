@@ -1,0 +1,456 @@
+#{list items:accountStatus.dcTransitionPoint, as:'tPointSnapshot'}
+    #{list tPointSnapshot.getValue(), as:'tPoint'}
+    <div class="box1 device" style="width:290px;">
+        #{if tPoint.esiDc.inCeRequestedState && controllers.VPP.gridStreamEnabled}
+	        <p class="warning nomarginall">
+	            <i class="fa fa-exclamation-triangle"></i> Utility Control Event Requested
+	        </p>
+	       	#{if controllers.VPP.gridStreamEnabled }
+	        <form id="optOut${tPoint.esiDc.getEsiDcId()}Form">
+		        <button id="optOut${tPoint.esiDc.getEsiDcId()}" class="btn btn-red btn-mini btn-block tooltip" title="Opt this device out of the Control Event" type="button">Opt Out <i class="fa fa-times"></i></button>
+	            <input type="hidden" id="accountId" name="accountId" value="${accountStatus.accountId}"/>
+	            <input type="hidden" id="esiDcId" name="esiDcId" value="${tPoint.esiDc.getEsiDcId()}"/>
+	        </form>
+	        <script>
+	        $("#optOut${tPoint.esiDc.getEsiDcId()}").click(function(){
+	            var submittedForm = $(this).parent('form').attr('id');
+	            Consert.deviceOptOut.deviceOptOut(submittedForm);
+	        });
+	        </script>
+	        #{/if}
+	    #{/if}
+	    #{elseif tPoint.esiDc.inActiveCe && controllers.VPP.gridStreamEnabled}
+	        <p class="warning nomarginall">
+	            <i class="fa fa-exclamation-triangle"></i> Utility Control Event In Progress
+	        </p>
+	        #{if controllers.VPP.gridStreamEnabled }
+	        <form id="optOut${tPoint.esiDc.getEsiDcId()}Form">
+		        <button id="optOut${tPoint.esiDc.getEsiDcId()}" class="btn btn-red btn-mini btn-block tooltip" title="Opt this device out of the Control Event" type="button">Opt Out <i class="fa fa-times"></i></button>
+	            <input type="hidden" id="accountId" name="accountId" value="${accountStatus.accountId}"/>
+	            <input type="hidden" id="esiDcId" name="esiDcId" value="${tPoint.esiDc.getEsiDcId()}"/>
+	        </form>
+	        <script>
+	        $("#optOut${tPoint.esiDc.getEsiDcId()}").click(function(){
+	            var submittedForm = $(this).parent('form').attr('id');
+	            Consert.deviceOptOut.deviceOptOut(submittedForm);
+	        });
+	        </script>
+	        #{/if}
+        #{/elseif}
+        #{consert.common.requireUserFunction com.consert.core.ejb.constant.OpsCenterConstants.FN_CUSTOMER_RECORD, write:true}
+        #{if tPoint.esiDc.deviceMacId != 0 && accountDeviceConfiguration != null}
+        <button href="#${tPoint.esiDc.getEsiDcId()}" class="btn btn-blue pull-right modal-config tooltip" title="${tPoint.esiDc.name} Configuration"><i class="fa fa-cog"></i></button>
+        #{/if}
+        #{/consert.common.requireUserFunction}
+        <span class="deviceType">${tPoint.esiDc.getDeviceTypeName()}</span>
+        <h3>${tPoint.esiDc.name}</h3>
+        <div class="box2 box-round" style="background-color:#4169E1">
+            <dl class="blocked">
+                <dt>Available Power:</dt><dd>${latestReadingByEsiDcId.get(tPoint.esiDc.getEsiDcId())}</dd>
+                <dt>Received Time:</dt><dd id="latestReading-${tPoint.esiDc.getEsiDcId()}"></dd>
+            </dl>
+        </div>
+        #{if tPoint.esiDc.getDeviceTypeName() != "AC Switch" && tPoint.esiDc.getDeviceTypeName() != "Single Heat" && tPoint.esiDc.getDeviceTypeName() != "Dual Heat"}
+        <div class="dcCurrent box2 box-round">
+            <h5 class="nomarginall nopaddingall">Current</h5>
+            <dl class="blocked">
+                <dt>Transition:</dt><dd>#{consert.common.timeString timeZone:accountTimeZoneID, dateTime:tPoint.current.tpTime.toDateTimeToday(accountTimeZone), format:"h:mm a"/}</dd>
+                <dt>Mode:</dt><dd>#{if tPoint.current.powerStatusFlag == "1"}On#{/if}#{else}Off#{/else}</dd>
+                #{if tPoint.current.tempFlag == "1"}
+                	<dt></dt><dd>Temporary Override</dd>
+                #{/if}
+            </dl>
+        </div>
+       	#{if tPoint.previous != null}
+	        <div class="dcPrev box4 box-round">
+	            <h5 class="nomarginall nopaddingall">Previous</h5>
+	            <dl class="blocked">
+	                <dt>Transition:</dt><dd>#{consert.common.timeString timeZone:accountTimeZoneID, dateTime:tPoint.previous.tpTime.toDateTimeToday(accountTimeZone), format:"h:mm a"/}</dd>
+	                <dt>Mode:</dt><dd>#{if tPoint.previous.powerStatusFlag == "1"}On#{/if}#{else}Off#{/else}</dd>
+	                #{if tPoint.previous.tempFlag == "1"}
+	                	<dt></dt><dd>Temporary Override</dd>
+	                #{/if}
+	            </dl>
+	        </div>
+		#{/if}
+        #{/if}
+        <span class="hidden">${tPoint.esiDc.name.replace(' ','')}</span>
+        #{consert.common.requireUserFunction com.consert.core.ejb.constant.OpsCenterConstants.FN_CUSTOMER_RECORD, write:true}
+        #{if controllers.VPP.gridStreamEnabled }
+        #{if !tPoint.esiDcPingResults}
+        <div id="devRes${tPoint.esiDc.getEsiDcId()}-progress" class="hidden">
+            <p id="ping${tPoint.esiDc.getEsiDcId()}-progress" class="info nomarginbottom tooltip" title="A 3 min Device Response window "><i class="fa fa-spinner fa-spin"></i> Device Response communication in progress.</p>
+            <small style="color:#A30000;" class="nomargintop">Page will refresh every 15 seconds.#{if tPoint.esiDcPingResults}<button class="pull-right btn btn-red btn-mini" style="cursor:pointer;" onClick="stopPing('${tPoint.esiDc.getEsiDcId()}')">Stop</button>#{/if}</small>
+        </div>
+        #{/if}
+        <div id="devRes${tPoint.esiDc.getEsiDcId()}-form"#{ifnot tPoint.esiDcPingResults} class="hidden"#{/ifnot}>
+            <table class="table table-bordered table-condensed table-rounded">
+                <thead>
+                    <tr>
+                        <th class="tooltip" title="Number of Requests"><i class="fa fa-share"></i></th>
+                        <th class="tooltip" title="Number of Responses"><i class="fa fa-reply-all"></i></th>
+                        <th>Requested</th>
+                        <th>Response</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr>
+                    #{if tPoint.esiDcPingResults}
+                        <td class="tooltip" title="Total Number of Requests">${tPoint.esiDcPingResults.pingRequests}</td>
+                        <td class="tooltip" title="Total Number of Responses">${tPoint.esiDcPingResults.pingResponses}</td>
+                        <td class="tooltip" title="Last Request Start Time">#{consert.common.timeString timeZone:accountTimeZoneID, dateTime:tPoint.esiDcPingResults.requestTime, format:"MMM d, YYYY hh:mm:ss a"/}</td>
+                        <td class="tooltip ${tPoint.esiDc.getEsiDcId()}ResponseTime" title="Last Response at #{consert.common.timeString timeZone:accountTimeZoneID, dateTime:tPoint.esiDcPingResults.responseTime, format:'MMM d, YYYY hh:mm:ss a'/}"></td>
+                    #{/if}
+                    #{else}
+                        <td colspan="4" style="border-radius:0 0 6px 6px;">No Response</td>
+                    #{/else}
+                    </tr>
+                </tbody>
+            </table>
+            <button id="ping${tPoint.esiDc.getEsiDcId()}" name="${tPoint.esiDc.getEsiDcId()}" class="btn btn-grey btn-block btn-100 tooltip" title="Check device communication"><i class="fa fa-rss"></i> Device Response</button>
+        </div>
+        <button id="tempOptOutBtn${tPoint.esiDc.getEsiDcId()}" onClick="$('#tempOptOut${tPoint.esiDc.getEsiDcId()}Form').slideDown(function(){$('#deviceWrapper').masonry();});$(this).hide();" class="btn btn-orange btn-block tooltip" title="Add an Opt Out window for this device"><i class="fa fa-calendar"></i>Opt Out Window</button>
+        <form id="tempOptOut${tPoint.esiDc.getEsiDcId()}Form" class="hidden" style="text-align:right;">
+            <input type="hidden" id="esiDcId${tPoint.esiDc.getEsiDcId()}" name="esiDcId" value="${tPoint.esiDc.getEsiDcId()}"/>
+            <input type="hidden" id="newStartTime${tPoint.esiDc.getEsiDcId()}" name="newStartTime" value=""/>
+            <input type="hidden" id="newEndTime${tPoint.esiDc.getEsiDcId()}" name="newEndTime" value=""/>
+            #{if tempOptOutStartDateMap.get(tPoint.esiDc.getEsiDcId()) == ''}
+            <p class="info smallmarginbottom"><strong class="nomarginall">Create New Opt Out Window</strong><br>
+            #{/if}
+            #{else}
+            <p class="warning smallmarginbottom"><strong class="nomarginall">Current Opt Out Window</strong><br>
+            #{/else}
+                Start: <input type="text" id="startDate${tPoint.esiDc.getEsiDcId()}" name="startDate" style="width:75px" placeholder="Date" value="${tempOptOutStartDateMap.get(tPoint.esiDc.getEsiDcId())}" style="cursor:pointer !important;" readonly /> <input type="text" id="startTime${tPoint.esiDc.getEsiDcId()}" name="startTime" class="input-mini nomarginleft" placeholder="Time" value="${tempOptOutStartTimeMap.get(tPoint.esiDc.getEsiDcId())}" style="cursor:pointer;" readonly /><br/>
+                End: <input type="text" id="endDate${tPoint.esiDc.getEsiDcId()}" name="endDate" style="width:75px" placeholder="Date" value="${tempOptOutEndDateMap.get(tPoint.esiDc.getEsiDcId())}" style="cursor:pointer !important;" readonly /> <input type="text" id="endTime${tPoint.esiDc.getEsiDcId()}" name="endTime" class="input-mini nomarginleft" placeholder="Time" value="${tempOptOutEndTimeMap.get(tPoint.esiDc.getEsiDcId())}" style="cursor:pointer;" readonly /><br/>
+            </p>
+            <button id="tempOptOutUpdate${tPoint.esiDc.getEsiDcId()}" class="btn btn-green btn-block" type="button">Update Opt-Out Window</button>
+            <button id="tempOptOutDelete${tPoint.esiDc.getEsiDcId()}" class="btn btn-red btn-block" type="button">Remove Opt-Out Window</button>
+            <button onClick="$('#tempOptOut${tPoint.esiDc.getEsiDcId()}Form').slideUp(function(){$('#tempOptOutBtn${tPoint.esiDc.getEsiDcId()}').show();$('#deviceWrapper').masonry();});" class="btn btn-blue btn-block" type="button">Cancel</button>
+        </form>
+        <script>
+		var startDateMin = '${tempOptOutStartDateMap.get(tPoint.esiDc.getEsiDcId())}';
+		var today${tPoint.esiDc.getEsiDcId()} = moment();
+
+        $( "#startDate${tPoint.esiDc.getEsiDcId()}" ).datepicker({
+			changeMonth: true,
+			numberOfMonths: 1,
+			minDate: (startDateMin != '' ? startDateMin : moment().format('MM/DD/YYYY')),
+			onClose: function( selectedDate ) {
+				var start = moment($('#startDate${tPoint.esiDc.getEsiDcId()}').val() + ' ' + $('#startTime${tPoint.esiDc.getEsiDcId()}').val()).add('hours', 23).add('minutes', 59);
+				$( "#endDate${tPoint.esiDc.getEsiDcId()}" ).datepicker( "option", "minDate", selectedDate );
+				$( "#endDate${tPoint.esiDc.getEsiDcId()}" ).datepicker( "option", "maxDate", start.format('MM/DD/YYYY') );
+				if($('#startDate${tPoint.esiDc.getEsiDcId()}').val() == moment().format('MM/DD/YYYY')){
+					$('#startTime${tPoint.esiDc.getEsiDcId()}').timepicker('option', {
+						minTime: {
+							hour: moment().add('minutes', 10).hours(),
+							minute: moment().add('minutes', 10).minutes()
+						}
+					});
+				}else{
+					$('#startTime${tPoint.esiDc.getEsiDcId()}').timepicker('option', {
+						minTime: {}
+					});
+				}
+				$('#startTime${tPoint.esiDc.getEsiDcId()}').focus();
+			}
+        });
+        $('#startTime${tPoint.esiDc.getEsiDcId()}').timepicker({
+            showPeriod: true,
+            showLeadingZero: false,
+            onSelect: function(){
+                $('#newStartTime${tPoint.esiDc.getEsiDcId()}').val($('#startDate${tPoint.esiDc.getEsiDcId()}').val() + ' ' + $(this).val());
+				var start = moment($('#startDate${tPoint.esiDc.getEsiDcId()}').val() + ' ' + $('#startTime${tPoint.esiDc.getEsiDcId()}').val()).add('hours', 23).add('minutes', 59);
+				$( "#endDate${tPoint.esiDc.getEsiDcId()}" ).datepicker( "option", "maxDate", start.format('MM/DD/YYYY') );
+				
+				if($('#startDate${tPoint.esiDc.getEsiDcId()}').val() == $('#endDate${tPoint.esiDc.getEsiDcId()}').val()){
+					$('#endTime${tPoint.esiDc.getEsiDcId()}').timepicker('option', {
+						minTime: {
+							hour: start.hours(),
+							minute: start.minutes()
+						}
+					});
+				}else{
+					$('#endTime${tPoint.esiDc.getEsiDcId()}').timepicker('option', {
+						minTime: {}
+					});
+				}
+            },
+            onClose: function(){
+                $('#endDate${tPoint.esiDc.getEsiDcId()}').focus();
+				$('#endTime${tPoint.esiDc.getEsiDcId()}').val('');
+            }
+        });
+        $( "#endDate${tPoint.esiDc.getEsiDcId()}" ).datepicker({
+          defaultDate: "+1d",
+          changeMonth: true,
+          numberOfMonths: 1,
+          onClose: function( selectedDate ) {
+            $( "#startDate${tPoint.esiDc.getEsiDcId()}" ).datepicker( "option", "maxDate", selectedDate );
+			var start = moment($('#startDate${tPoint.esiDc.getEsiDcId()}').val() + ' ' + $('#startTime${tPoint.esiDc.getEsiDcId()}').val()).add('hours', 23).add('minutes', 59);
+			if($('#startDate${tPoint.esiDc.getEsiDcId()}').val() == $(this).val()){
+				var time = moment($( "#startDate${tPoint.esiDc.getEsiDcId()}" ).val() + ' ' + $('#startTime${tPoint.esiDc.getEsiDcId()}').val()).add(10, 'minutes');// Minimum 10 min window
+				$('#endTime${tPoint.esiDc.getEsiDcId()}').timepicker('option', {
+					minTime: {
+						hour: time.hours(),
+						minute: time.minutes()
+					},
+					maxTime: {}
+				});
+			}else{
+				$('#endTime${tPoint.esiDc.getEsiDcId()}').timepicker('option', {
+					minTime: {},
+					maxTime: {
+						hour: start.hours(),
+						minute: start.minutes()
+					}
+				});
+			}
+            $('#endTime${tPoint.esiDc.getEsiDcId()}').focus();
+          }
+        });
+        $('#endTime${tPoint.esiDc.getEsiDcId()}').timepicker({
+            showPeriod: true,
+            showLeadingZero: false,
+			minTime: {
+				hour: today${tPoint.esiDc.getEsiDcId()}.add(10, 'minutes').format('HH'),
+				minute: today${tPoint.esiDc.getEsiDcId()}.add(10, 'minutes').format('mm')
+			},
+            onSelect: function(){
+                $('#newEndTime${tPoint.esiDc.getEsiDcId()}').val($('#endDate${tPoint.esiDc.getEsiDcId()}').val() + ' ' + $(this).val());
+            }
+        });
+        $("#tempOptOutUpdate${tPoint.esiDc.getEsiDcId()}").click(function(){
+			var now = moment();
+			var startTime = moment($('#startDate${tPoint.esiDc.getEsiDcId()}').val() + ' ' + $('#startTime${tPoint.esiDc.getEsiDcId()}').val());
+			var stopTime = moment($('#endDate${tPoint.esiDc.getEsiDcId()}').val() + ' ' + $('#endTime${tPoint.esiDc.getEsiDcId()}').val());
+			
+			if($('#startDate${tPoint.esiDc.getEsiDcId()}').val() == '' || $('#endDate${tPoint.esiDc.getEsiDcId()}').val() == '' || $('#startTime${tPoint.esiDc.getEsiDcId()}').val() == '' || $('#endTime${tPoint.esiDc.getEsiDcId()}').val() == ''){
+				alert('All fields are required.');
+				$('#startDate${tPoint.esiDc.getEsiDcId()}').addClass('input-error');
+				$('#endDate${tPoint.esiDc.getEsiDcId()}').addClass('input-error');
+				$('#startTime${tPoint.esiDc.getEsiDcId()}').addClass('input-error');
+				$('#endTime${tPoint.esiDc.getEsiDcId()}').addClass('input-error');
+				return;
+			}else if(startTime.isBefore(now)){
+				alert('Opt Out Window Start cannot be before now');
+				$('#startDate${tPoint.esiDc.getEsiDcId()}').addClass('input-error');
+				$('#startTime${tPoint.esiDc.getEsiDcId()}').addClass('input-error');
+				return;
+			}else if(stopTime.isBefore(startTime)){
+				alert('Opt Out Window Stop cannot be before Start Time');
+				$('#endDate${tPoint.esiDc.getEsiDcId()}').addClass('input-error');
+				$('#endTime${tPoint.esiDc.getEsiDcId()}').addClass('input-error');
+				return;
+			}else{
+				var submittedForm = $(this).parent('form').attr('id');
+	            Consert.tempDeviceOptOut.tempDeviceOptOutUpdate(submittedForm);
+			}
+        });
+        $("#tempOptOutDelete${tPoint.esiDc.getEsiDcId()}").click(function(){
+            var submittedForm = $(this).parent('form').attr('id');
+            Consert.tempDeviceOptOut.tempDeviceOptOutDelete(submittedForm);
+        });
+        
+        $(function(){
+            if(getCookie("${tPoint.esiDc.getEsiDcId()}") != ''){
+                $("#devRes${tPoint.esiDc.getEsiDcId()}-progress").slideDown('slow',function(){
+                    $('#deviceWrapper').masonry();
+                });
+                if("${tPoint.esiDcPingResults}" == ''){
+                setTimeout(function(){
+                    window.location=window.location;
+                },15000);
+              }
+            }else{
+                $("#devRes${tPoint.esiDc.getEsiDcId()}-form").show('slow',function(){
+                    $('#deviceWrapper').masonry();
+                });
+            }
+            #{if tPoint.esiDcPingResults}
+            #{if tPoint.esiDcPingResults.getLastPingResponseTime() >= 0}
+            var responseTime = ${tPoint.esiDcPingResults.getLastPingResponseTime()} / 1000;
+            $('.${tPoint.esiDc.getEsiDcId()}ResponseTime').html('<i class="fa fa-check pull-right" style="color:#060;"></i>'+responseTime+'s');
+            #{/if}
+            #{else}
+            $('.${tPoint.esiDc.getEsiDcId()}ResponseTime').html('<i class="fa fa-times pull-right" style="color:#600;"></i> None').attr('title','No Responses');
+            #{/else}
+            #{/if}
+        });
+        $("#ping${tPoint.esiDc.getEsiDcId()}").click(function() {
+            var esiDcId = ${tPoint.esiDc.getEsiDcId()};
+            Consert.devicePing.devicePing(esiDcId);
+        });
+        </script>
+        #{/if}
+        <div id="${tPoint.esiDc.getEsiDcId()}" class="deviceConfigDetail hidden">
+        #{list items:accountDeviceConfiguration, as:'table'}
+	        #{list items:table.deviceModels, as:'dev'}
+		        #{if dev.deviceMacAddress == tPoint.esiDc.deviceMacId}
+		            <form id="${tPoint.esiDc.getEsiDcId()}ManualConfig" class="deviceCurrent">
+		                <small style="color:#C00;" class="${tPoint.esiDc.getEsiDcId()}NewVal hidden">Showing all EDITABLE configurations</small>
+		                <table class="table table-hover table-bordered table-striped table-centered">
+		                <thead>
+		                    <tr>
+		                        <th>Category</th>
+		                        <th>Value</th>
+		                        <th>Source</th>
+		                    </tr>
+		                </thead>
+		                <tbody>
+		                #{list items:dev.deviceConfigCategories, as:'cat'}
+		                    #{if cat.treatment != "Ignore"}
+		                    <tr#{if cat.treatment == "NoEdit"} class="${tPoint.esiDc.getEsiDcId()}CurVal"#{/if}>
+		                        <td>${cat.categoryDesc}</td>
+		                        <td>
+		                            #{if cat.treatment != "NoEdit"}
+		                            <div class="${tPoint.esiDc.getEsiDcId()}CurVal">${cat.configurationValue}</div>
+		                            <input type="text" class="inputbox categoryId#{if cat.treatment != "Edit"} input-med#{/if}#{else} input-mini#{/else} ${tPoint.esiDc.getEsiDcId()}NewVal hidden" name="${cat.categoryId}" value="${cat.configurationValue}" placeholder="${cat.configurationValue}" />
+		                            #{/if}
+		                            #{else}${cat.configurationValue}#{/else}
+		                        </td>
+		                        <td>
+		                            #{if cat.configSource == "DeviceConfiguration"}
+		                            <span style="color:#C00000;">${cat.configSource}</span>
+		                            <button type="button" id="${tPoint.esiDc.getEsiDcId()}-RemoveConfig${cat.categoryId}" name="${cat.categoryId}" class="btn btn-red btn-mini btn-block pull-right ${tPoint.esiDc.getEsiDcId()}-RemoveConfig ${tPoint.esiDc.getEsiDcId()}NewVal hidden" title="Remove this manual configuration"><i class="fa fa-times"></i> Remove</button>
+		                            #{/if}
+		                            #{elseif cat.configSource == "ConfigurationGroup"}
+		                            <span style="color:#006600;">${cat.configSource}</span>
+		                            #{/elseif}
+		                            #{else}
+		                            ${cat.configSource}
+		                            #{/else}
+		                        </td>
+		                    </tr>
+		                    #{/if}
+		                #{/list}
+		                </tbody>
+		                </table>
+		                <br>
+		                <input type="hidden" id="${tPoint.esiDc.getEsiDcId()}ManualConfigDcId" name="dcId" value="${dev.dcId}" />
+		            </form>
+		        #{/if}
+	        #{/list}
+        #{/list}
+            <div class="deviceConfigLeftColumn">
+                <h2 class="deviceConfigTitle">Current Configuration</h2>
+                <div class="deviceConfigOverview">
+                    <dl class="blocked">
+                        <dt>Mac Address:</dt><dd>${tPoint.esiDc.deviceMacId}</dd>
+                        <dt>Serial Number:</dt><dd>${Long.toHexString(tPoint.esiDc.deviceMacId)}</dd>
+                        <dt>Relay Status:</dt><dd>${relayStatusByEsiDcIdMap.get(tPoint.esiDc.esiDcId)}</dd>
+                        <dt>Latest Reading:</dt><dd id="latestReading-${tPoint.esiDc.getEsiDcId()}"></dd>
+                    </dl>
+                </div>
+                <div class="deviceConfigButtons">
+                    <button id="${tPoint.esiDc.getEsiDcId()}GroupUpdateBtn" href="#${tPoint.esiDc.getEsiDcId()}Group" class="btn btn-blue btn-block pull-left modal3 tooltip" title="Configuration Groups for ${tPoint.esiDc.name}"><i class="fa fa-cog"></i> Update Config Group</button>
+                    <button id="${tPoint.esiDc.getEsiDcId()}Update" class="btn btn-orange btn-block tooltip" title="Manually update the device configuration"><i class="fa fa-cogs"></i> Manual Configuration</button>
+                    <button id="${tPoint.esiDc.getEsiDcId()}Push" name="${tPoint.esiDc.getEsiDcId()}" class="btn btn-green btn-block tooltip" title="Push configuration to the device"><i class="fa fa-paper-plane"></i> Push Configuration</button>
+                    <button type="button" id="${tPoint.esiDc.getEsiDcId()}Save" name="${tPoint.esiDc.getEsiDcId()}ManualConfig" class="btn btn-green btn-large btn-block hidden"><i class="fa fa-save"></i> Save Configuration</button>
+                    <a href="#" class="link hidden" id="${tPoint.esiDc.getEsiDcId()}Cancel">Cancel Manual Config Update</a>
+                </div>
+                <script>
+				 // Save Manual Update
+				$("#${tPoint.esiDc.getEsiDcId()}Save").click(function(){
+					var submittedForm = $(this).attr('name');
+					Consert.deviceConfig.deviceConfigUpdate(submittedForm);
+				});
+				// Remove Manual Config for Category Item
+				$(".${tPoint.esiDc.getEsiDcId()}-RemoveConfig").click(function(){
+					var submittedForm = $(this).attr('id');
+					Consert.deviceConfig.deviceConfigRemove(submittedForm);
+				});
+				$('#${tPoint.esiDc.getEsiDcId()}Push').click(function(){
+					var submittedForm = $(this).attr('name');
+					Consert.deviceConfig.pushConfig(submittedForm);
+				});
+				$(function(){
+					var offset = parseInt($('#systemTime').data('tzOffset').replace(':00','').replace('0',''));
+                    $('#latestReading-${tPoint.esiDc.getEsiDcId()}').html( moment("${latestReadingTimeByEsiDcIdMap.get(tPoint.esiDc.esiDcId)}").add(offset, 'h').format("MMMM Do, YYYY<br/> h:mm:ss A" ) );
+				});
+					$(function(){
+					var offset = parseInt($('#systemTime').data('tzOffset').replace(':00','').replace('0',''));
+                    $('#latestReadingtimestamp-${tPoint.esiDc.getEsiDcId()}').html( moment("${latestReadingTimeByEsiDcIdMap.get(tPoint.esiDc.esiDcId)}").add(offset, 'h').format("MMMM Do, YYYY<br/> h:mm:ss A" ) );
+				});
+				</script>
+            </div>
+        </div>
+        <div id="${tPoint.esiDc.getEsiDcId()}Group" class="deviceConfigUpdate hidden">
+            <div class="groupConfigPreview">
+                <div id="groupConfigPreview-${tPoint.esiDc.getEsiDcId()}"></div>
+            </div>
+            <div class="leftColumn">
+                <h2>Groups</h2>
+                <form id="${tPoint.esiDc.name.replace(" ","")}AddGroup">
+                #{list items:accountDeviceConfiguration, as:'table'}
+                #{list items:table.deviceModels, as:'dev'}
+                #{if dev.deviceMacAddress == tPoint.esiDc.deviceMacId}
+                     <input type="hidden" id="${tPoint.esiDc.getEsiDcId()}AddGroupDcId" value="${dev.dcId}">
+                #{/if}
+                #{/list}
+                #{/list}
+                    <select id="configGroupId" class="inputbox configGroupId${tPoint.esiDc.esiDcId}">
+                        <option value="">Select a Group</option>
+                    #{list items:deviceConfigGroups, as:'group'}
+                    #{if group.tableId <= 1 || group.tableId == 4}
+                        <option value="${group.configGroupId}">${group.configGroupDescription}</option>
+                    #{/if}
+                    #{/list}
+                    </select>
+                </form>
+                <div id="groupConfigPreview-${tPoint.esiDc.getEsiDcId()}-btns" class="deviceConfigButtons hidden">
+                    <button id="${tPoint.esiDc.getEsiDcId()}GroupSave" name="${tPoint.esiDc.name.replace(" ","")}AddGroup" class="btn btn-green btn-large btn-block pull-left"><i class="fa fa-save"></i> Assign Device to Group</button>
+                    <button href="#${tPoint.esiDc.getEsiDcId()}" class="btn btn-red btn-block modal3 tooltip" title="${tPoint.esiDc.name} Configuration"><i class="fa fa-times"></i> Cancel</button>
+                </div>
+                <script>
+                    /* Save Group Update */
+                    $("#${tPoint.esiDc.getEsiDcId()}GroupSave").click(function(){
+                        var submittedForm = $(this).attr('id');
+	                    Consert.deviceConfig.deviceGroupAdd(submittedForm);
+                    });
+                </script>
+            </div>
+            <script>
+            $("#${tPoint.esiDc.getEsiDcId()}Update").click(function(){
+                $(".${tPoint.esiDc.getEsiDcId()}CurVal").fadeOut('slow');
+                $(this).fadeOut('slow');
+                $('#${tPoint.esiDc.getEsiDcId()}GroupUpdateBtn').fadeOut('slow');
+				$("#${tPoint.esiDc.getEsiDcId()}Push").fadeOut('slow');
+                setTimeout(function(){
+                    $(".${tPoint.esiDc.getEsiDcId()}NewVal").fadeIn('slow');
+                    $("#${tPoint.esiDc.getEsiDcId()}Save").fadeIn('slow');
+                    $("#${tPoint.esiDc.getEsiDcId()}Cancel").fadeIn('slow');
+					$.fancybox.update();
+                },250);
+            });
+            $("#${tPoint.esiDc.getEsiDcId()}Cancel").click(function(){
+                $(".${tPoint.esiDc.getEsiDcId()}NewVal").fadeOut('slow');
+                $("#${tPoint.esiDc.getEsiDcId()}Save").fadeOut('slow');
+                $("#${tPoint.esiDc.getEsiDcId()}Cancel").fadeOut('slow');
+                setTimeout(function(){
+					$("#${tPoint.esiDc.getEsiDcId()}Push").fadeIn('slow');
+                    $(".${tPoint.esiDc.getEsiDcId()}CurVal").fadeIn('slow');
+                    $("#${tPoint.esiDc.getEsiDcId()}Update").fadeIn('slow');
+                    $('#${tPoint.esiDc.getEsiDcId()}GroupUpdateBtn').fadeIn('slow');
+                    $.fancybox.update();
+                },250);
+            });
+            $('.configGroupId${tPoint.esiDc.esiDcId}').change(function(){
+                var preview = '#groupConfigPreview-${tPoint.esiDc.getEsiDcId()}';
+                var buttons = preview + '-btns';
+                if($(this).val() != ''){
+                    $(preview).html($('#preview' + $(this).val()).html());
+                    setTimeout(function(){
+                        $(buttons).fadeIn('slow');
+                        $.fancybox.update();
+                    },250);
+                }else{
+                    $(preview).html('');
+                    $(buttons).fadeOut('fast');
+                }
+            });
+            </script>
+        </div>
+        #{/consert.common.requireUserFunction}
+    </div>
+    #{/list}
+#{/list}

@@ -1,0 +1,738 @@
+#{extends 'main.html' /}
+#{set title:'Event' /}
+#{set pageTags:'section:vpp page:detailCe' /}
+
+#{if !ced.future}
+<script type="text/javascript" src="https://www.google.com/jsapi"></script>
+<script type="text/javascript">
+google.load('visualization', '1.1', {packages: ['corechart', 'controls','gauge']});
+function initiateCharts(){
+	google.load('visualization', '1.0', {'packages':['controls']});
+	google.setOnLoadCallback(drawEnergy);
+}
+function drawEnergy(){
+	$.ajax({
+		url: "${play.ctxPath}/json/vpp/powerConsumedByDeviceType?controlEventId=${ce.ceId}",
+		dataType:"json",
+		success	: function(jsonData) {
+			if(jsonData.success != false){
+					var data = new google.visualization.DataTable(jsonData);
+					var rows = data.getNumberOfRows();
+					var cols = data.getNumberOfColumns();
+					for(var r = 0;r < rows; ++r){
+						data.setValue(r,0,new Date(data.getValue(r,0)));
+					}
+					
+					// Instantiate and draw our chart, passing in some options.
+					var chart = new google.visualization.ChartWrapper({
+						chartType: 'ComboChart',
+						containerId: 'chart_div',
+						dataTable: data,
+						options: {
+						   // Use the same chart area width as the control for axis alignment.
+						   chartArea: {'height': '70%', 'width': '100%','left':75,'right':5},
+						   colors: ['#4EE058','#954EE0','#2228D6','#FFD668','#FF7668','#E468FF','#6873FF'],
+						   vAxis: {
+							   title:'Energy Usage in kWh',
+							   format: '###.####'
+						   },
+						   hAxis: {
+							   slantedText: true,
+								 gridlines: {
+									 color: '#000'
+								 },
+								 minorGridlines: {
+									 color: '#CCC'
+								 }
+							},
+						   legend: {'position': 'top'},
+						   backgroundColor: 'transparent',
+						   title:'Device Energy Usage 4 Hours Before and During Event',
+						   crosshair: { 'trigger': 'selection' },
+						   seriesType: 'bars',
+							 explorer: {
+								actions: ['dragToZoom', 'rightClickToReset']
+							},
+							animation:{
+								duration: 1000,
+								easing: 'out',
+							}
+						}
+					});
+					
+					// create columns array
+					var columns = [0];
+					/* the series map is an array of data series
+					 * "column" is the index of the data column to use for the series
+					 * "roleColumns" is an array of column indices corresponding to columns with roles that are associated with this data series
+					 * "display" is a boolean, set to true to make the series visible on the initial draw
+					 */
+					var seriesMap = [];
+
+					for(var c = 1; c < cols; c++){
+						seriesMap.push({
+							column: c,
+							display: true
+						});
+					}
+					var columnsMap = {};
+					var series = [];
+					for (var i = 0; i < seriesMap.length; i++) {
+						var col = seriesMap[i].column;
+						columnsMap[col] = i;
+						// set the default series option
+						series[i] = {};
+						if (seriesMap[i].display) {
+							// if the column is the domain column or in the default list, display the series
+							columns.push(col);
+							series[0] = {
+								type: 'line',
+								pointShape: 'triangle',
+								pointSize: 8,
+								color: '#4EE058'
+							};
+						}else{
+							// otherwise, hide it
+							columns.push({
+								label: data.getColumnLabel(col),
+								type: data.getColumnType(col),
+								sourceColumn: col,
+								calc: function () {
+									return null;
+								}
+							});
+							// backup the default color (if set)
+							if (typeof(series[i].color) !== 'undefined') {
+								series[i].backupColor = series[i].color;
+							}
+							series[i].color = '#CCCCCC';
+						}
+					}
+					
+					chart.setOption('series', series);
+					
+					function showHideSeries () {
+						var sel = chart.getChart().getSelection();
+						// if selection length is 0, we deselected an element
+						if (sel.length > 0) {
+							// if row is undefined, we clicked on the legend
+							if (sel[0].row == null) {
+								var col = sel[0].column;
+								if (typeof(columns[col]) == 'number') {
+									var src = columns[col];
+									
+									// hide the data series
+									columns[col] = {
+										label: data.getColumnLabel(src),
+										type: data.getColumnType(src),
+										sourceColumn: src,
+										calc: function () {
+											return null;
+										}
+									};
+									
+									// grey out the legend entry
+									series[columnsMap[src]].color = '#CCCCCC';
+								}
+								else {
+									var src = columns[col].sourceColumn;
+									
+									// show the data series
+									columns[col] = src;
+									series[columnsMap[src]].color = null;
+								}
+								var view = chart.getView() || {};
+								view.columns = columns;
+								chart.setView(view);
+								chart.draw();
+							}
+						}
+					}
+					
+					google.visualization.events.addListener(chart, 'select', showHideSeries);
+					
+					// create a view with the default columns
+					var view = {
+						columns: columns
+					};
+					chart.draw();
+			}else{
+				$('#devPartDash').html('');
+				$('#chartErrors').append( $('<div />').addClass('instructions').html('No <span class="accent">Power Data</span> to Display') );
+			}
+		},
+		error	: function(){
+			$('#devPartDash').html('');
+			$('#chartErrors').append( $('<div />').addClass('instructions').html('No <span class="accent">Power Data</span> to Display') );
+		}
+	});
+        drawGroup();
+
+}
+function drawGroup(){
+	$.ajax({
+		url: "${play.ctxPath}/json/vpp/groupStates?controlEventId=${ce.ceId}",
+		dataType:"json",
+		success: function(groupStates){
+			//PHNX-28 removing status NEW/OPTING OUT/STOPPING
+			var index = '';
+			for(var i = 0; i < groupStates.cols.length; i++) {
+				if(groupStates.cols[i].id == 'new'||groupStates.cols[i].id == 'optingOut'||groupStates.cols[i].id == 'stopping') {
+					groupStates.cols.splice(i, 1);
+					index +=i+',';
+				}		
+			}
+			index = index.split(",");
+			for(var j = 0; j < groupStates.rows.length; j++) {
+				for(k = 0;k<index.length-1;k++){
+					groupStates.rows[j].c.splice(index[k], 1);
+				}		
+			}
+		
+			// Create our data tables out of JSON data loaded from server.
+			var data = new google.visualization.DataTable(groupStates);
+		
+			 var dashboard = new google.visualization.Dashboard(
+                           document.getElementById('devGroup'));
+
+				   
+			// Define a category picker control
+			var categoryPicker = new google.visualization.ControlWrapper({
+			'controlType': 'CategoryFilter',
+			'containerId': 'control',
+			'options': {
+			  'filterColumnLabel': 'Group',
+			  'ui': {
+			  'labelStacking': 'vertical',
+				'allowTyping': false,
+				'allowMultiple': true
+			  }
+			}
+		  });
+		  
+		  var maxVal = 1;
+		  for(var i = 1; i < data.getNumberOfColumns(); ++i){
+			  var colMax = data.getColumnRange(i).max;
+			  if(colMax > maxVal){
+				  maxVal = colMax;
+			  }
+		  }
+	
+		  var gridlines = 2;
+			if ( maxVal > 5) {
+				gridlines = 3;
+			}
+			if ( maxVal > 10) {
+				gridlines = 4;
+			}
+		
+		   var chart = new google.visualization.ChartWrapper({
+			 'chartType': 'ColumnChart',
+			 'containerId': 'group',
+			 'options': {
+			   // Use the same chart area width as the control for axis alignment.
+			   'chartArea': {'height': '70%', 'width': '100%','left':50,'right':5},
+			   'hAxis': {
+				   'slantedText': true,
+				   'format': '###'
+				},
+				'vAxis': { 
+				  'viewWindow':{min:0},
+				  'format':'###',
+				  'gridlines': {count:gridlines}
+				},
+			   'legend': {'position': 'top'},
+			   'backgroundColor': 'transparent',
+			   'pointSize': 3, 'pointShape': 'circle',
+			   'title':'Device Status by Group',
+			   //'colors': ['#65B200','#00A3B2','#B2AF00','#EF0300','#A00200','#A0A0A0','#000000'],
+			   'colors': ['#00A3B2','#B2AF00','#A00200','#000000'],
+				'animation':{
+					duration: 1000,
+					easing: 'out',
+				}
+			   // Origianal Chart Colors
+			   //'colors': ['#BBE783','#DFEAFF','#F2FFA5','#FF8873','#FAD56C','#F0F0F0','#E1E1E1']
+			 },
+			 'view': {
+			   'columns': [0, 1, 2, 3, 4]
+			 }
+		   });
+		   
+		   dashboard.bind(categoryPicker,chart);
+		   dashboard.draw(data);
+		   $('#detailsSection').masonry();
+		},
+		error	: function(){
+			$('#devGroup').html('')
+			$('#chartErrors').append( $('<div />').addClass('instructions').html('No <span class="accent">Group Data</span> to Display') );
+		}
+	});
+        drawDevice();
+
+}
+function drawDevice(){
+	$.ajax({
+		url: "${play.ctxPath}/json/vpp/deviceStatesByDeviceTypes?controlEventId=${ce.ceId}",
+		dataType:"json",
+		success: function(typeStates){
+			//PHNX-28 removing status NEW/OPTING OUT/STOPPING
+			var index = '';
+			for(var i = 0; i < typeStates.cols.length; i++) {
+				if(typeStates.cols[i].id == 'new'||typeStates.cols[i].id == 'optingOut'||typeStates.cols[i].id == 'stopping') {
+					typeStates.cols.splice(i, 1);
+					index +=i+',';
+				}		
+			}
+			index = index.split(",");
+			for(var j = 0; j < typeStates.rows.length; j++) {
+				for(k = 0;k<index.length-1;k++){
+					typeStates.rows[j].c.splice(index[k], 1);
+				}		
+			}
+		
+			// Create our data tables out of JSON data loaded from server.
+			var data = new google.visualization.DataTable(typeStates);
+
+			 var dashboard = new google.visualization.Dashboard(
+                           document.getElementById('devType'));
+
+				   
+			// Define a category picker control
+			var categoryPicker = new google.visualization.ControlWrapper({
+			'controlType': 'CategoryFilter',
+			'containerId': 'control2',
+			'options': {
+			  'filterColumnLabel': 'Device Type',
+			  'ui': {
+			  'labelStacking': 'vertical',
+				'allowTyping': false,
+				'allowMultiple': true
+			  }
+			}
+		  });
+		  
+		  var maxVal = 1;
+		  for(var i = 1; i < data.getNumberOfColumns(); ++i){
+			  var colMax = data.getColumnRange(i).max;
+			  if(colMax > maxVal){
+				  maxVal = colMax;
+			  }
+		  }
+		  var gridlines = 2;
+			if ( maxVal > 5) {
+				gridlines = 3;
+			}
+			if ( maxVal > 10) {
+				gridlines = 4;
+			}
+		
+		   var chart = new google.visualization.ChartWrapper({
+			 'chartType': 'ColumnChart',
+			 'containerId': 'type',
+			 'options': {
+			   // Use the same chart area width as the control for axis alignment.
+			   'chartArea': {'height': '70%', 'width': '100%','left':50,'right':5},
+			   'hAxis': {
+				   'slantedText': true,
+				   'format': '###'
+				},
+				'vAxis': { 
+				  'viewWindow':{min:0},
+				  'format':'###',
+				  'gridlines': {count:gridlines}
+				},
+			   'legend': {'position': 'top'},
+			   'backgroundColor': 'transparent',
+			   'pointSize': 3, 'pointShape': 'circle',
+			   'title':'Device Status by Device Type',
+			   //'colors': ['#65B200','#00A3B2','#B2AF00','#EF0300','#A00200','#A0A0A0','#000000'],
+			   'colors': ['#00A3B2','#B2AF00','#A00200','#000000'],
+				'animation':{
+					duration: 1000,
+					easing: 'out',
+				}
+			   // Origianal Chart Colors
+			   //'colors': ['#BBE783','#DFEAFF','#F2FFA5','#FF8873','#FAD56C','#F0F0F0','#E1E1E1']
+			 },
+			 'view': {
+			   'columns': [0, 1, 2, 3, 4]
+			 }
+		   });
+		   
+		   dashboard.bind(categoryPicker,chart);
+		   dashboard.draw(data);
+		   $('#detailsSection').masonry();
+		},
+		error	: function(){
+			$('#devType').html('');
+			$('#chartErrors').append( $('<div />').addClass('instructions').html('No <span class="accent">Device Data</span> to Display') );
+		}
+	});
+        setTimeout(function(){initiateCharts()}, &{'config.utility.cedetail.chart_refresh_in_seconds'} * 1000);
+
+}
+initiateCharts();
+</script>
+#{/if}
+
+<div id="alarms">
+#{ifErrors}
+#{errors}
+<p class="error">${error}</p>
+#{/errors}
+#{/ifErrors}
+#{if !ce.auto}
+	<h1>&{'lang.label.ce.detail.summary.pageHeader.user', ce.controlEventId }</h1>
+#{/if}
+#{else}
+	<h1>&{'lang.label.ce.detail.summary.pageHeader.auto', ce.controlEventId }</h1>
+#{/else}
+#{if ce.powerRemoved == 0.0 && ce.ceStatus == "IN_PROGRESS"}
+    <p class="warning">Conservation Event has begun. Power and device information will be updated momentarily.</p>
+#{/if}
+#{if ced.future}
+<p id="warnings" class="warning" style="display:none;"></p>
+#{/if}
+<div id="IncludedDeviceTypes"></div>
+<div id="detailsSection">
+   
+#{if ced.running}
+	<div class="ce-timer">
+    #{if !ce.auto && !controllers.VPP.gridStreamEnabled || controllers.VPP.gridStreamEnabled}
+        <strong>&{'lang.label.ce.detail.time.remainingLabel'}</strong>
+        <div id="eventCountdown" title="Time remaining for this CE" class="tooltip"></div>
+        <!--<div id="eventProgress"></div>-->
+        <div class="ce-actions">
+            <button type="button" onclick="window.location.href='@{VPP.detailCe(ce.ceId)}';" class="btn btn-block btn-orange btn-round tooltip" title="Refresh the data for this CE"><span class="fa fa-refresh"></span> Refresh Details</button>
+  	#{/if}
+#{/if}
+#{if ced.future}
+    <div class="ce-timer">
+        <strong>&{'lang.label.ce.detail.time.startInLabel'}</strong>
+        <div id="startCountdown"></div>
+        <div class="ce-actions">
+            <button type="button" onclick="window.location.href='@{VPP.detailCe(ce.ceId)}';" class="btn btn-block btn-orange btn-round"><span class="fa fa-refresh"></span> Refresh Details</button>
+#{/if}
+
+    #{if ced.future}
+        #{if !ce.auto}
+        #{consert.common.requireUserFunction name:com.consert.core.ejb.constant.OpsCenterConstants.FN_CONTROL_EVENT, write:true}
+            <button type="button" onclick="window.location.href='@{VPP.editCe(ce.ceId)}';" class="btn btn-blue btn-round btn-block"><span class="fa fa-edit"></span> Edit Conservation Event</button>
+            <button id="stopCe-display" type="button" onClick="$('#stopce-btn').click();" class="btn btn-red btn-round btn-block"><span class="fa fa-times"></span> Cancel Conservation Event</button>
+            <a href="#stopce" class="modal2" id="stopce-btn"></a>
+            <div style="display:none;" id="stopce">
+                <h3 class="ceStop">Cancel CE?</h3>
+                <small>To cancel CE enter your password</small>
+                #{form @VPP.stopCe(), class:"cancelForm", id:"stopFutureCeForm"}
+                    <span class="util-form-field-error">#{error 'password' /}</span>
+                    <input type="password" name="password" id="password" value="" class="inputbox block" placeholder="Password" />
+                    <input type="submit" id="stopFutureCeButton" class="btn btn-red btn-block btn-round" value="Cancel" />
+                    <input type="hidden" name="ceId" id="ceId" value=${ce.ceId} />
+                #{/form}
+            </div>
+            #{/consert.common.requireUserFunction}
+        </div>
+        #{/if}
+    </div>
+    #{/if}
+    #{if ced.past}
+    #{/if}
+        
+    #{if ced.running}
+    #{if !ce.auto && !controllers.VPP.gridStreamEnabled || controllers.VPP.gridStreamEnabled}
+         #{consert.common.requireUserFunction name:com.consert.core.ejb.constant.OpsCenterConstants.FN_CONTROL_EVENT, write:true}
+            <button type="button" onclick="window.location.href='@{VPP.editCe(ce.ceId)}';" class="btn btn-blue btn-round btn-block tooltip" title="Edit this CE"><span class="fa fa-edit"></span> Edit Conservation Event</button>
+            #{if controllers.VPP.gridStreamEnabled}
+            <button id="ceReport" type="button" class="btn btn-green btn-round btn-block hidden tooltip" title="View report for this CE"><span class="fa fa-file-text-o"></span> Conservation Event Report</button>
+            #{/if}
+            <button id="stopCe-display" type="button" onClick="$('#stopce-btn').click();" class="btn btn-red btn-round btn-block tooltip#{ifnot ce.mode == com.consert.core.ejb.constant.OpsCenterConstants.eventMode.VPP} hidden#{/ifnot}" title="Click to STOP this CE"><span class="fa fa-times"></span> Stop Conservation Event</button>
+            <a href="#stopce" class="modal2" id="stopce-btn"></a>
+            <div id="stopce" class="hidden">
+            <h3 class="ceStop">Stop CE?</h3>
+            <small>To stop CE enter your password</small>
+            #{form @vpp.stopCe(), class:"stopForm", id:"stopRunningCeForm"}
+                <span class="util-form-field-error">#{error 'password' /}</span>
+                <input type="password" name="password" id="password" value="" class="inputbox block tooltip" title="Enter your password to initiate CE Stop Sequence" placeholder="Password" />
+                <input type="submit" id="stopRunningCeButton" class="btn btn-red btn-block btn-round" value="Stop" />
+                <input type="hidden" name="ceId" id="ceId" value=${ce.ceId} />
+            #{/form}
+            </div>
+            <script>
+			$(function(){
+				$.ajax({
+					type: 'get',
+					dataType: 'json',
+					url: "${play.ctxPath}/json/vpp/getDeviceStatusReportEnabled",
+					success: function(check){
+						if(check.data == 'true'){
+							$('#ceReport').show();
+							$('#detailsSection').masonry();
+							$('#ceReport').click(function(){
+								var url = '@{VPP.ceReport(ce.ceId)}';
+								window.open(url);
+							});
+						}else{
+							$('#ceReport').hide();
+							$('#detailsSection').masonry();
+						}
+					},
+					error: function(){
+						$('#ceReport').hide();
+						$('#detailsSection').masonry();
+					}
+				});
+				activeWindow();
+			});
+			function activeWindow(){
+				$.ajax({
+					type: 'get',
+					dataType: 'json',
+					url: "${play.ctxPath}/json/broadcast/activeWindow",
+					success: function(check){
+						if(check.data === true){
+							$('#stopCe-display').show();
+							$('#detailsSection').masonry();
+						}else{
+							setTimeout(function(){activeWindow()}, 30 * 1000);
+						}
+					}
+				});
+			}
+			</script>
+			#{/consert.common.requireUserFunction}
+        </div>
+        
+        #{/if}
+	</div>
+    #{/if}
+
+    <div class="ce-info">
+        <span class="fa-stack fa-lg ce-details-icon">
+            <i class="fa fa-circle fa-stack-2x"></i>
+            <i class="fa fa-info fa-stack-1x fa-inverse"></i>
+        </span>
+        <h3>Event Summary</h3>
+        <span class="summaryLabel">&{'lang.label.ce.detail.time.startTimeLabel'}</span>
+		<span class="summaryValue">#{consert.common.timeString dateTime:ce.startTime, format:"E MMM d, YYYY hh:mm:ss a z"/}</span>
+    #{if !ce.auto || (ce.auto && ceDefinitionUsed != null)}
+        <span class="summaryLabel">&{'lang.label.ce.detail.time.durationLabel'}</span>
+        <span class="summaryValue">#{consert.common.duration start:ce.startTime, stop:ce.stopTime/}</span>
+	#{/if}
+        <span class="summaryLabel">&{'lang.label.ce.detail.summary.statusLabel'}</span>
+        <span class="summaryValue">&{'lang.label.ce.status.' + ce.ceStatus}</span>
+        <span class="summaryLabel">&{'lang.label.ce.detail.summary.eventModeLabel'}</span>
+    #{if ce.mode == com.consert.core.ejb.constant.OpsCenterConstants.eventMode.VPP}
+        <span class="summaryValue">&{'lang.label.ce.vpp'}</span>
+    #{/if}
+    #{elseif ce.mode == com.consert.core.ejb.constant.OpsCenterConstants.eventMode.CYCLING}
+        <span class="summaryValue">&{'lang.label.ce.cycling'}</span>
+    #{/elseif}
+    #{else}
+        <span class="summaryValue">&{'lang.label.ce.unknown'}</span>
+    #{/else}
+		<span class="summaryLabel">&{'lang.label.ce.detail.summary.criticalNormalLabel'}</span>
+    #{if ce.criticalFlag == "1"}
+        <span class="summaryValue">&{'lang.label.ce.critical'}</span>
+    #{/if}
+    #{else}
+        <span class="summaryValue">&{'lang.label.ce.normal'}</span>
+    #{/else}
+        <span class="summaryLabel">&{'lang.label.ce.detail.summary.startedByLabel'}</span>
+        <span class="summaryValue">${ce.userCreated}</span>
+    #{if ceDefinitionUsed}
+        <span class="summaryLabel">&{'lang.label.ce.definition.nameUsed'}</span>
+        <span class="summaryValue">${ceDefinitionUsed.definitionName}</span>
+    #{/if}
+    </div>
+    <div class="ce-power">
+        <span class="fa-stack fa-lg ce-details-icon2">
+            <i class="fa fa-circle fa-stack-2x"></i>
+            <i class="fa fa-bolt fa-stack-1x fa-inverse"></i>
+        </span>
+        <h3>Power Summary</h3>
+#{if ce.mode != com.consert.core.ejb.constant.OpsCenterConstants.eventMode.CYCLING}
+        <span class="powerLabel">&{'lang.label.ce.detail.power.powerToRemoveLabel'}</span>
+    #{if ce.powerRequestedInPercent == "0"}
+        <span class="powerValue">#{consert.common.power ce.powerToRemove/}
+        #{if ce.additionalPowerToRemove != 0 }
+            #{if ce.powerRequestedInPercent == "0"}
+                <sup class="additionalPower tooltip" title="&{'lang.label.ce.detail.power.additionalPowerToRemoveLabel'}">+#{consert.common.power ce.additionalPowerToRemove/}</sup>
+            #{/if}
+        #{/if}
+        </span>
+    #{/if}
+    #{else}
+        <span class="powerValue">Percentage of power available by group
+        #{if ce.additionalPowerToRemove != 0 }
+            #{if ce.powerRequestedInPercent == "0"}
+                <sup class="additionalPower tooltip" title="&{'lang.label.ce.detail.power.additionalPowerToRemoveLabel'}">+${additionalPowerToRemovePercentage}%</sup>
+            #{/if}
+        #{/if}
+        </span>
+    #{/else}
+        <span class="powerLabel">&{'lang.label.ce.detail.power.currentPowerRemovedLabel'}</span>
+        <span class="powerValue">#{consert.common.power ce.powerRemoved/}</span>
+#{/if}
+#{else}
+        <span class="powerLabel">&{'lang.label.ce.detail.summary.eventModeLabel'}</span>
+        <span class="powerValue">&{'lang.label.ce.cycling'}</span>
+#{/else}
+        <span class="powerLabel">&{'lang.label.ce.detail.power.powerAvailableLabel'}</span>
+        <span class="powerValue">#{consert.common.power ce.powerAvailable/}</span>
+        <span class="powerLabel">&{'lang.label.ce.detail.power.deviceTypesLabel'}</span>
+        <span class="powerValue">
+			${includedDeviceTypes}
+        </span>
+    </div>
+</div>
+#{if !ced.future}
+<div style="width:77%">
+    <div id="devPartDash" style="width: 100%;">
+        <div id="chart_div" style="width: 100%; height: 500px;"><p class="instructions loading" style="text-align:center;"><span class="fa fa-spinner fa-spin accent"></span> Loading Energy Usage Chart...</p></div>
+    </div>
+    <div id="devType" style="width: 100%;padding-top:20px;">
+        <div id="control2" style="width:100%;height:50px;display:none;"></div>
+        <div id="type" style="width: 100%; height: 550px;"><p class="instructions loading" style="text-align:center;"><span class="fa fa-spinner fa-spin accent"></span> Loading Device by Type Chart...</p></div>
+    </div>
+    <div id="devGroup" style="width: 100%;padding-top:20px;">
+        <div id="control" style="width:100%;height:50px;display:none;"></div>
+        <div id="group" style="width: 100%; height: 550px;"><p class="instructions loading" style="text-align:center;"><span class="fa fa-spinner fa-spin accent"></span> Loading Device by Group Chart...</p></div>
+    </div>
+    <div id="chartErrors"></div>
+</div>
+#{/if}
+</div>
+<script type="text/javascript">
+var localizedTimeStringStart = '#{consert.common.timeString dateTime:ce.startTime, format:"YYYY-MM-d\'T\'H:mm:ssZZ"/}';
+var localizedTimeStringStop = '#{consert.common.timeString dateTime:ce.stopTime, format:"YYYY-MM-d\'T\'H:mm:ssZZ"/}';
+var includedDeviceTypes = '${includedDeviceTypes}';
+var includedDeviceTypesArray = includedDeviceTypes.split(',');
+function checkCharts(){
+	var loader = $('p.loading');
+	if(loader.is(':visible')){
+		window.location = window.location;
+	}
+}
+setTimeout(function(){checkCharts()}, 60 * 1000);
+
+$(function(){
+   alert(includedDeviceTypesArray);
+   var includedDevices = [];
+    $.each(includedDeviceTypesArray , function(index,deviceType)
+    {
+    if(deviceType.trim() == 'Storage Water Heater')
+    {
+    deviceType = 'SWH - Storage Water Heater'
+    }
+    if(deviceType.trim() == 'Storage Heat')
+    {
+    deviceType = 'STH : Storage Heat'
+    }
+    if(deviceType.trim() == 'Single Heat')
+    {
+    deviceType = 'SH : Single Heat'
+    }
+    if(deviceType.trim() == 'Dual Heat')
+    {
+    deviceType = 'DH : Dual Heat'
+    }
+    if(deviceType.trim() == 'AC Switch')
+    {
+    deviceType = 'ACS : AC Switch'
+    }
+    if(deviceType.trim() == 'Irrigation Pump')
+    {
+    deviceType = 'IP : Irrigation Pump'
+    }
+    if(deviceType.trim() == 'Crop Heat')
+    {
+    deviceType = 'CH : Crop Heat'
+    }
+    if(deviceType.trim() == 'Generator')
+    {
+    deviceType = 'GEN : Generator'
+    }
+    if(deviceType.trim() == 'Water Heater')
+    {
+    deviceType = 'WH : Water Heater'
+    }
+    if(deviceType.trim() == 'Pool Pump/Spa/Jacuzzi')
+    {
+    deviceType = 'PP : Pool Pump/Spa/Jacuzzi'
+    }
+    if(deviceType.trim() == 'Electric Vehicle Charger')
+    {
+    deviceType = 'EVC : Electric Vehicle Charger'
+    }
+    if(deviceType.trim() == 'Electric Vehicle Charger Storage')
+    {
+    deviceType = 'EVCS : Electric Vehicle Charger Storage'
+    }
+    includedDevices.push(deviceType);
+    });
+    $.each(includedDevices, function(){
+    $('#IncludedDeviceTypes').append('<li>'+this+'</li>');
+    $("li").css({"dispaly":"inline-block"});
+    });
+	#{if ced.future}
+	$('#detailsSection').css({'float':'none','width':'100%'});
+	$('#detailsSection').masonry({'columnWidth':60});
+	#{/if}
+	#{else}
+	$('#detailsSection').masonry();
+	#{/else}
+	var eventStartDatetime = moment(localizedTimeStringStart, 'YYYY-MM-DDTHH:mm:ss').toDate();
+	var eventStopDatetime = moment(localizedTimeStringStop, 'YYYY-MM-DDTHH:mm:ss').toDate();
+	
+    $('#startCountdown').countdown({
+    	until: eventStartDatetime,
+    	timezone: Consert.tools.getCookie("user_tz") / 60,
+    	compact: false,
+    	tickInterval: 1,
+    	expiryUrl: '@{VPP.detailCe(ce.ceId)}'
+    });
+
+
+	#{if ced.future}
+		var currentTime = new Date();
+		if (currentTime >  eventStartDatetime)
+		{	
+			$('#warnings').slideDown('fast').html('This Conservation Event will begin momentarily. Please wait.');
+			setTimeout(function(){window.location = window.location;}, 10 * 1000);
+		}
+	#{/if}
+    	
+	$('#eventCountdown').countdown({
+		until: eventStopDatetime,
+		compact: false,
+		tickInterval: 1,
+		timezone: Consert.tools.getCookie("user_tz") / 60,
+		onTick: function(){
+			var start = Date.parse('${ce.startTime}'.replace(/[.][0-9][0-9][0-9]/, ""));
+			var stop = Date.parse('${ce.stopTime}'.replace(/[.][0-9][0-9][0-9]/, ""));
+			var now = new Date();
+			var percent = 100 * ( now - start ) / ( stop - start );
+		},
+		expiryUrl: '@{VPP.detailCe(ce.ceId)}'
+	});
+	
+	$('.stopForm').submit(function(e){
+		var stopConfirm = confirm('Are you sure you want to STOP Event #' + $(this).find('input[name="ceId"]').val() + '?');
+		if (!stopConfirm){
+			return false;
+		}
+	});
+	
+	$('.cancelForm').submit(function(e){
+		var stopConfirm = confirm('Are you sure you want to CANCEL Event #' + $(this).find('input[name="ceId"]').val() + '?');
+		if (!stopConfirm){
+			return false;
+		}
+	});
+	#{ifErrors}
+	$('#password').addClass('error');
+	$('#stopce-btn').click();
+	#{/ifErrors}
+});
+</script>

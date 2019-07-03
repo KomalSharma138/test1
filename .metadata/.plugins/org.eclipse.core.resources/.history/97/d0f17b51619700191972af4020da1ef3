@@ -1,0 +1,142 @@
+package com.consert.core.entities;
+
+import java.io.Serializable;
+
+import javax.persistence.Column;
+import javax.persistence.Entity;
+import javax.persistence.FetchType;
+import javax.persistence.GeneratedValue;
+import javax.persistence.GenerationType;
+import javax.persistence.Id;
+import javax.persistence.JoinColumn;
+import javax.persistence.ManyToOne;
+import javax.persistence.OneToOne;
+import javax.persistence.SequenceGenerator;
+import javax.persistence.Table;
+
+import org.apache.openjpa.persistence.Externalizer;
+import org.apache.openjpa.persistence.Factory;
+import org.apache.openjpa.persistence.Persistent;
+import org.apache.openjpa.persistence.jdbc.Strategy;
+import org.joda.time.DateTime;
+import org.joda.time.LocalDate;
+
+
+@Entity
+@Table(name = "PRGM_TMPLT_SCHED_RANGE")
+public class ProgramTemplateScheduleRange implements Serializable {
+	
+	@Id
+	@SequenceGenerator(name="PRGM_TMPLT_SCHED_RANGE_ID_GENERATOR", allocationSize=1, sequenceName="PRGM_TMPLT_SCHED_RANGE_SEQ")
+	@GeneratedValue(strategy=GenerationType.SEQUENCE)
+	@Column(name = "PRGM_TMPLT_SCHED_RANGE_ID")
+	private int programTemplateScheduleRangeId;
+	
+	@Column(name = "START_DATE")
+	@Persistent
+	@Externalizer("com.consert.core.utils.PersistenceUtilities.getDateFromLocalDate")
+	@Factory("com.consert.core.utils.PersistenceUtilities.getLocalDateFromDate")
+	private LocalDate startDate;
+
+	@Column(name = "END_DATE")
+	@Persistent
+	@Externalizer("com.consert.core.utils.PersistenceUtilities.getDateFromLocalDate")
+	@Factory("com.consert.core.utils.PersistenceUtilities.getLocalDateFromDate")
+	private LocalDate endDate;
+
+	@Column(name = "USR_MODIFIED")
+	@Strategy("com.consert.core.utils.EmptyStringStrategy")
+	private String userModified;
+
+	@Column(name = "DATE_MODIFIED")
+	@Persistent
+	@Externalizer("com.consert.core.utils.PersistenceUtilities.getTimestampFromDateTime")
+	@Factory("com.consert.core.utils.PersistenceUtilities.getDateTimeFromTimestamp")
+	private DateTime dateModified;
+
+	@Column(name = "USR_CREATED")
+	@Strategy("com.consert.core.utils.EmptyStringStrategy")
+	private String userCreated;
+
+	@Column(name = "DATE_CREATED")
+	@Persistent
+	@Externalizer("com.consert.core.utils.PersistenceUtilities.getTimestampFromDateTime")
+	@Factory("com.consert.core.utils.PersistenceUtilities.getDateTimeFromTimestamp")
+	private DateTime dateCreated;
+		
+	@ManyToOne(fetch = FetchType.LAZY)
+	@JoinColumn(name = "PRGM_TMPLT_PRGM_ID")
+	private ProgramTemplateProgram programTemplateProgramId;
+
+	private static final long serialVersionUID = 1L;
+
+	public int getProgramTemplateScheduleRangeId() {
+		return programTemplateScheduleRangeId;
+	}
+
+	public void setProgramTemplateScheduleRangeId(int programTemplateScheduleRangeId) {
+		this.programTemplateScheduleRangeId = programTemplateScheduleRangeId;
+	}
+
+	public LocalDate getStartDate() {
+		return startDate;
+	}
+
+	public void setStartDate(LocalDate startDate) {
+		this.startDate = startDate;
+	}
+
+	public LocalDate getEndDate() {
+		return endDate;
+	}
+
+	public void setEndDate(LocalDate endDate) {
+		this.endDate = endDate;
+	}
+
+	public String getUserModified() {
+		return userModified;
+	}
+
+	public void setUserModified(String userModified) {
+		this.userModified = userModified;
+	}
+
+	public DateTime getDateModified() {
+		return dateModified;
+	}
+
+	public void setDateModified(DateTime dateModified) {
+		this.dateModified = dateModified;
+	}
+
+	public String getUserCreated() {
+		return userCreated;
+	}
+
+	public void setUserCreated(String userCreated) {
+		this.userCreated = userCreated;
+	}
+
+	public DateTime getDateCreated() {
+		return dateCreated;
+	}
+
+	public void setDateCreated(DateTime dateCreated) {
+		this.dateCreated = dateCreated;
+	}
+
+	public ProgramTemplateProgram getProgramTemplateProgramId() {
+		return programTemplateProgramId;
+	}
+
+	public void setProgramTemplateProgramId(ProgramTemplateProgram programTemplateProgramId) {
+		this.programTemplateProgramId = programTemplateProgramId;
+	}
+	
+	public static long getSerialversionuid() {
+		return serialVersionUID;
+	}
+	
+
+}

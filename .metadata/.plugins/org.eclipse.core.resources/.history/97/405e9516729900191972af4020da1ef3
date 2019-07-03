@@ -1,0 +1,174 @@
+package com.consert.web.datamart;
+
+import java.util.List;
+
+import org.joda.time.DateTime;
+import org.joda.time.format.DateTimeFormatter;
+import org.joda.time.format.ISODateTimeFormat;
+
+import com.consert.web.util.ConsertLogger;
+
+import play.Logger;
+import play.i18n.Messages;
+
+import com.consert.core.ejb.constant.OpsCenterConstants;
+import com.consert.core.ejb.exception.AbstractOpsCenterRuntimeException;
+import com.consert.core.ejb.exception.DataNotAvailableException;
+import com.consert.core.ejb.session.interfaces.ControlEventPowerBeanRemote;
+import com.consert.core.ejb.session.interfaces.GenericBeanRemote;
+import com.consert.core.model.CeDeviceTypeModel;
+import com.consert.utils.googleCharts.ActiveDeviceStatus;
+import com.consert.web.util.CacheUtility;
+import com.consert.web.util.SessionBeanFactory;
+
+public class JsonDataMartDeviceTracker implements JsonDataMartProvider
+{
+	public static final String ACTIVE_DEVICES_IN_EVENT = "deviceStatesByDeviceTypes";
+	private static final String[] MART_ID_LIST = { ACTIVE_DEVICES_IN_EVENT };
+
+	@Override
+	public String acquireJsonData(String dataMartId, JsonBidirectionalDataMartFilter filter)
+			throws DataNotAvailableException, IllegalArgumentException
+	{
+		ConsertLogger.info("[ENTER] String JsonDataMartDeviceTracker.acquireJsonData(" + dataMartId + ", "
+				+ filter + ")");
+
+		ControlEventPowerBeanRemote ceEjb = SessionBeanFactory.getControlEventPowerBean();
+
+		try
+		{
+			List<CeDeviceTypeModel> deviceTypes = ceEjb.getDeviceLogsForControlEvent(filter
+					.getControlEventId());
+
+			ConsertLogger.info("[  ...] DeviceTypes retrieved from EJB : " + deviceTypes);
+
+			ActiveDeviceStatus devicesInEvent = new ActiveDeviceStatus();
+
+			for (CeDeviceTypeModel deviceType : deviceTypes)
+			{
+				/*
+				 * DEV-1887 Ignore BMM_DC if it appears in the device type list
+				 */
+				if (deviceType.getDeviceType().equalsIgnoreCase(OpsCenterConstants.BMM_DC))
+				{
+					continue;
+				}
+				if (deviceType.getDeviceType().equalsIgnoreCase(OpsCenterConstants.DC_STORAGE_WATER_HEATER))
+				{
+					deviceType.setDeviceTypeName("SWH");
+				}
+
+				devicesInEvent.addRecord(deviceType.getDeviceTypeName(),
+						deviceType.getNumberOfInitial(), deviceType.getNumberOfInProgress(),
+						deviceType.getNumberOfDrifted(), deviceType.getNumberOfOptingOut(),
+						deviceType.getNumberOfOptedOut(), deviceType.getNumberOfStopping(),
+						deviceType.getNumberOfStopped());
+			}
+
+			String json = devicesInEvent.toString();
+
+			ConsertLogger.info("[  ...] JSON retrieved from EJB : " + json);
+
+			ConsertLogger.info("[ EXIT] JsonDataMartDeviceTracker.acquireJsonData");
+
+			return json;
+		}
+		catch (AbstractOpsCenterRuntimeException e)
+		{
+			ConsertLogger.error(e, "JsonDataMartDeviceTracker: AbstractOpsCenterRuntimeException: " + e);
+			throw new DataNotAvailableException(e.getClass().getSimpleName(), e.getMessage());
+		}
+	}
+
+	@Override
+	public void populateAvailableMartList(JsonOutgoingDataMartList list)
+	{
+		ConsertLogger.info("[ENTER] void JsonDataMartDeviceTracker.populateAvailableMartList");
+
+		for (String martId : MART_ID_LIST)
+		{
+			JsonBidirectionalDataMartFilter filter = new JsonBidirectionalDataMartFilter();
+			filter.setMartId(martId);
+			filter.setInterval(JsonBidirectionalDataMartFilter.INTERVAL_15MINUTES);
+			filter.setProgramId(Integer.parseInt(Messages
+					.get("config.utility.datamart.loadprofile.program_id.default")));
+			filter.setZipcode(Integer.parseInt(Messages
+					.get("config.utility.datamart.weather.zipcode.default")));
+
+			GenericBeanRemote genEjb = SessionBeanFactory.getGenericBean();
+
+			String[] deviceIdList = genEjb.getCeValidDeviceTypeIds(CacheUtility.getSessionTenantId());
+
+			for (String deviceTypeId : deviceIdList)
+			{
+				/*
+				 * DEV-1887 Ignore BMM_DC if it appears in the device type list
+				 */
+				if (deviceTypeId.equalsIgnoreCase(OpsCenterConstants.BMM_DC))
+				{
+					continue;
+				}
+
+				filter.getIncludeDeviceTypeIds().add(deviceTypeId);
+			}
+
+			// Option A: format with ISO
+			DateTimeFormatter isofmt = ISODateTimeFormat.dateTime();
+			DateTime now = new DateTime();
+			filter.setStart(isofmt.print(now)); // Format the query filter to
+												// not include the milliseconds
+			filter.setStop(isofmt.print(now));
+
+			list.getAvailableDataMarts().put(martId, filter);
+		}
+
+		ConsertLogger.info("[ EXIT] JsonDataMartDeviceTracker.populateAvailableMartList");
+	}
+
+	@Override
+	public boolean providesDataMart(String dataMartId)
+	{
+		boolean provides = false;
+
+		ConsertLogger.info("[ENTER] boolean JsonDataMartDeviceTracker.providesDataMart(String dataMartId)");
+		if (Logger.isDebugEnabled())
+		{
+			ConsertLogger.debug("[  ...] dataMartId : " + dataMartId);
+		}
+
+		// Check the list of statically defined keys that the Energybean
+		// provides.
+		// Hopefully engineers have been keeping this array up to date!
+		for (String element : MART_ID_LIST)
+		{
+			if (element.equalsIgnoreCase(dataMartId))
+			{
+				provides = true;
+				ConsertLogger.info("[ EXIT] JsonDataMartDeviceTracker.providesDataMart");
+				break;
+			}
+		}
+
+		ConsertLogger.info("[ EXIT] JsonDataMartDeviceTracker.providesDataMart");
+
+		return provides;
+	}
+
+	/*public static void main(String[] args)
+	{
+		ActiveDeviceStatus status = new ActiveDeviceStatus();
+
+		Random random = new Random();
+
+		String[] deviceTypes = { "Thermostat", "Pool Pump", "Water Heater", "AC Switch", "HVAC" };
+
+		for (int i = 0; i < 20; i++)
+		{
+			status.addRecord(deviceTypes[random.nextInt(deviceTypes.length)], random.nextInt(10),
+					random.nextInt(10), random.nextInt(10),
+					random.nextInt(10), random.nextInt(10), random.nextInt(10), random.nextInt(10));
+		}
+
+		ConsertLogger.info(status.toString());
+	}*/
+}

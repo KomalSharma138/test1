@@ -1,0 +1,16 @@
+1550663263606	Delete element
+1550730415086	Copy package
+1550730438113	Rename type 'Topic'
+1550730462962	Rename type 'TopicController'
+1550730479940	Rename type 'TopicRepository'
+1550730494628	Rename type 'TopicService'
+1550730514660	Rename field 'topicRepository'
+1550730541228	Rename field 'topicService'
+1550730700990	Rename local variable 'topic'
+1550730725095	Rename method 'addTopic'
+1550730743366	Rename method 'getTopic'
+1550730762516	Rename method 'updateTopic'
+1550730777864	Rename method 'deleteTopic'
+1550731066472	Rename method 'getTopic'
+1550731122293	Rename method 'updateTopic'
+1550731137080	Rename method 'deleteTopic'

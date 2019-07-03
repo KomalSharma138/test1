@@ -1,0 +1,867 @@
+package controllers;
+
+import java.util.ArrayList;
+import java.util.Iterator;
+import java.util.List;
+
+import org.joda.time.DateTime;
+import org.joda.time.DateTimeZone;
+
+import com.consert.web.util.ConsertLogger;
+import play.mvc.Scope.Session;
+import play.data.validation.Required;
+import play.data.validation.Validation;
+import play.exceptions.UnexpectedException;
+import play.i18n.Messages;
+import play.mvc.With;
+
+import com.consert.core.ejb.constant.DefaultResources;
+import com.consert.core.ejb.constant.OpsCenterConstants;
+import com.consert.core.ejb.exception.AbstractOpsCenterException;
+import com.consert.core.ejb.exception.AbstractOpsCenterRuntimeException;
+import com.consert.core.ejb.exception.EsiNotFoundException;
+import com.consert.core.ejb.exception.EsiNotUniqueException;
+import com.consert.core.ejb.exception.ProgramNotFoundException;
+import com.consert.core.ejb.exception.SystemUnavailableException;
+import com.consert.core.ejb.exception.UserNotUniqueException;
+import com.consert.core.ejb.session.interfaces.UserBeanRemote;
+import com.consert.core.ejb.session.interfaces.UserLoginBeanRemote;
+import com.consert.core.ejb.session.interfaces.UserProgramBeanRemote;
+import com.consert.core.model.AccountModel;
+import com.consert.core.model.EsiDcModel;
+import com.consert.core.model.RoleModel;
+import com.consert.core.model.UserLoginCombinedObject;
+import com.consert.core.model.UserModel;
+import com.consert.core.model.UserProgramModel;
+import com.consert.web.auth.PasswordUtility;
+import com.consert.web.exception.AbstractWebException;
+import com.consert.web.exception.ProgramValidationException;
+import com.consert.web.program.ProgramUtility;
+import com.consert.web.util.CacheUtility;
+import com.consert.web.util.MessageUtility;
+import com.consert.web.util.SessionBeanFactory;
+
+// Secured Controller, check for one time use token in the get args
+@With(Secure.class)
+/**
+ * LoginChain is a controller pattern that is executed upon each login.
+ * LoginChain checks for any required steps before the user is pushed to the main site.
+ *   Examples of these are password required reset, migration data collection (ex: email for 3.1)
+ * 
+ * @author brockman
+ */
+public class LoginChain extends ConsertConsumerController
+{
+	public static final String GATEWAY_MODE_NORMAL = OpsCenterConstants.GATEWAY_STATUS_NORMAL;
+
+	public static void start() throws AbstractWebException
+	{
+		startLogin();
+	}
+
+	public static void checkMaintenanceMode()
+			throws AbstractWebException
+	{
+		
+		checkMaintenanceModeForLogin();
+		
+	}
+
+	public static void resetPassword() throws AbstractWebException
+	{
+		// Do we need to reset th eusers's password?
+		UserLoginBeanRemote userEjb = SessionBeanFactory.getUserLoginBean();
+		if (!userEjb.isUserLoginAfterPasswordReset(CacheUtility.getSessionConsertUsername(), CacheUtility.getSessionTenantId()))
+		{
+			setPrimaryEmail();
+			return;
+		}
+
+		// Require the user to reset their password upon login.
+		// This can happen when an administrator changes the users password or the users uses the recover password functionality. 
+		render();
+	}
+
+	/**
+	 * Require the user to reset their password upon login. This can happen when an administrator
+	 * changes the users password or the users uses the recover password functionality.
+	 * 
+	 * @throws AbstractWebException
+	 */
+
+	public static void resetPasswordSubmit(@Required String password, @Required String passwordConfirm)
+			throws AbstractWebException
+	{
+		// Mid-implementation,redirect back to create user for now
+		validation.equals(password, passwordConfirm);
+
+		if (!Validation.hasErrors())
+		{
+			// Get the current user out of the cache
+			UserModel user = CacheUtility.requireUserFromGlobalCache();
+
+			// Build a lightweight UserModel to do the update
+			UserModel userInfo = new UserModel();
+			userInfo.setUserId(user.getUserId());
+			userInfo.setPassword(password);
+
+			// Make the session bean call to update password
+			UserBeanRemote userEjb = SessionBeanFactory.getUserBean();
+			try
+			{
+				userEjb.updateUserPassword(userInfo, CacheUtility.getSessionTenantId());
+			}
+			catch (Exception x)
+			{
+				ConsertLogger.error("Untyped Exception Caught on UpdateUserPassword: " + x.getClass().getSimpleName() + ": "
+						+ x.getMessage());
+				Validation.addError("", "Untyped Exception Caught on UpdateUserPassword: "
+						+ x.getClass().getSimpleName() + ": " + x.getLocalizedMessage());
+			}
+		}
+
+		if (Validation.hasErrors())
+		{
+			params.flash(); // add http parameters to the flash scope
+			Validation.keep(); // keep the errors for the next request
+			resetPassword();
+			return;
+
+		}
+		// Continue OK
+		setPrimaryEmailForLogin();
+
+	}
+
+	public static void setPrimaryEmail() throws AbstractWebException
+	{
+		// Is this user a pre 3.1 user that had no primary email address?
+
+		UserModel user = CacheUtility.requireUserFromGlobalCache();
+		boolean requireEmailSet = true;
+
+		if (user.getEmail() != null && PasswordUtility.isEmailAddressValid(user.getEmail()))
+		{
+			requireEmailSet = false;
+		}
+
+		// KRMT-3179, Dont' rqeuire masqueradede users to reset
+		if (Session.current() != null &&
+				Session.current().get(CacheUtility.SESSION_KEY_SSO_FLAG) != null)
+		{
+			requireEmailSet = false;
+		}
+
+		if (!requireEmailSet)
+		{
+			// We're good!
+			termsAndConditions();
+			return;
+		}
+
+		render(user);
+	}
+
+	public static void setPrimaryEmailSubmit(@Required String email, @Required String emailConfirm)
+			throws AbstractWebException
+	{
+		// require that the email be valid
+		if (!PasswordUtility.isEmailAddressValid(email))
+		{
+			Validation.addError(email, "Valid Email Address Format Required");
+		}
+
+		// Mid-implementation,redirect back to create user for now
+		validation.equals(email, emailConfirm);
+
+		if (!Validation.hasErrors())
+		{
+			// Get the current user out of the cache
+			UserModel user = CacheUtility.requireUserFromGlobalCache();
+
+			// Make the session bean call to update password
+			UserBeanRemote userEjb = SessionBeanFactory.getUserBean();
+			try
+			{
+				// Be very explict about modifing the user 
+				UserModel dbUser = userEjb.findUserInfoByUsername(user.getUsername(),CacheUtility.getSessionTenantId());
+				dbUser.setEmail(email);
+				dbUser.setUserModified(user.getUsername());
+				dbUser.setDateModified(new DateTime());
+				dbUser.setPassword(null); // Prevent password corruption KRMT-3183
+				userEjb.updateUser(dbUser, CacheUtility.getSessionTenantId());
+
+				// Cache update as well.
+				user.setEmail(email);
+			}
+			catch (Exception x)
+			{
+				ConsertLogger.error("Untyped Exception Caught on updateUser: " + x.getClass().getSimpleName() + ": "
+						+ x.getMessage());
+				Validation.addError("", "Untyped Exception Caught on updateUser: " + x.getClass().getSimpleName()
+						+ ": " + x.getLocalizedMessage());
+			}
+		}
+
+		if (Validation.hasErrors())
+		{
+			params.flash(); // add http parameters to the flash scope
+			Validation.keep(); // keep the errors for the next request
+			setPrimaryEmail();
+			return;
+		}
+		// Continue OK
+		termsAndConditionsForLogin();
+	}
+
+	public static void termsAndConditions() throws AbstractWebException
+	{
+		boolean userMustAgreeToTandC = true;
+
+		String msgTandC = Messages.get("register.display.termsandconditions");
+		if (msgTandC != null && !"".equals(msgTandC))
+		{
+			userMustAgreeToTandC = Boolean.parseBoolean(msgTandC);
+		}
+
+		if (!userMustAgreeToTandC)
+		{
+			announcements();
+			return;
+		}
+
+		// Has the user already agreed?
+		UserModel user = CacheUtility.requireUserFromGlobalCache();
+
+		if (user.getTermsAgrmntFlag() != null &&
+				user.getTermsAgrmntFlag().equalsIgnoreCase(OpsCenterConstants.TRUE))
+		{
+			announcements();
+			return;
+		}
+		// Display the T+C form
+		render();
+	}
+
+	public static void termsAndConditionsSubmit() throws AbstractWebException
+	{
+		// Pull the user object, set terms flag to 1, save, and continue
+		UserBeanRemote userEjb = SessionBeanFactory.getUserBean();
+		try
+		{
+			UserModel serverUser = userEjb.findUserInfoByUsername(CacheUtility.requireUserFromGlobalCache().getUsername(), CacheUtility.getSessionTenantId());
+			serverUser.setTermsAgrmntFlag(OpsCenterConstants.TRUE);
+			serverUser.setPassword(null); // Do not reset the password
+			serverUser.setDateModified(new DateTime());
+			serverUser.setUserModified(serverUser.getUsername());
+
+			userEjb.updateUser(serverUser, CacheUtility.getSessionTenantId());
+		}
+		catch (UserNotUniqueException e)
+		{
+			ConsertLogger.error(e, "LoginChain Terms And Conditions Submit");
+			throw new UnexpectedException(e);
+		}
+		catch (SystemUnavailableException e)
+		{
+			ConsertLogger.error(e, "LoginChain Terms And Conditions Submit");
+			throw new UnexpectedException(e);
+		}
+		catch (Exception e)
+		{
+			ConsertLogger.error(e, "LoginChain Terms And Conditions Submit");
+			throw new UnexpectedException(e);
+		}
+
+		announcementsForLogin();
+	}
+
+	public static void announcements() throws AbstractWebException
+	{
+		String announcement = Messages.get("lang.loginChain.announcements.content");
+
+		if (announcement == null || announcement.length() == 0
+				|| announcement.equals("lang.loginChain.announcements.content"))
+		{
+			AccountModel currentAccount = CacheUtility.requireCurrentAccountFromGlobalCache();
+			if ((currentAccount.getAmiOnlyFlag() != null && currentAccount.getAmiOnlyFlag().equals("1")) ||
+					(currentAccount.getCyclingOnlyAccountFlag() != null
+					&& currentAccount.getCyclingOnlyAccountFlag().equals("1")))
+			{
+				complete();
+			}
+			else
+			{
+				ensureDefaultProgramsForAllAccounts();
+			}
+		}
+
+		// Display any announcement s/ ads the user is required to view
+		render(announcement);
+	}
+
+	public static void announcementsPost() throws AbstractWebException
+	{
+		AccountModel currentAccount = CacheUtility.requireCurrentAccountFromGlobalCache();
+		if (currentAccount.getAmiOnlyFlag() != null && currentAccount.getAmiOnlyFlag().equals("1"))
+		{
+			complete();
+		}
+		else
+		{
+			ensureDefaultProgramsForAllAccountsOnLogin();
+		}
+	}
+
+	public static void ensureDefaultProgramsForAllAccounts() throws AbstractWebException
+	{
+		// Require that all users logging in has a default program set for their account
+		// Check all accounts and make sure there is a default program for each
+		UserProgramBeanRemote userProgramEjb = SessionBeanFactory.getUserProgramBean();
+
+		try
+		{
+			List<AccountModel> accountList = CacheUtility.requireAccountListFromGlobalCache();
+
+			// Iterate over the list of accounts returned, and ensure that each has a default program.
+			for (AccountModel account : accountList)
+			{
+				UserProgramModel program = userProgramEjb.getDefaultProgramForAccount(account.getAccountId(), CacheUtility.getSessionTenantId());
+
+				// KRMT-1451, Need to pull the correct devices for teh account to validate properly. Don't intermix devices.
+				// 2011-Feb-25 KRMT-1310: Login Chain must check and see if the default program is valid.
+				ProgramUtility.validateUserProgram(program,
+						userProgramEjb.getTstatDeviceListForAccount(account.getAccountId(), CacheUtility.getSessionTenantId()),
+						userProgramEjb.getDcDeviceListForAccount(account.getAccountId(), CacheUtility.getSessionTenantId()));
+			}
+		}
+		catch (ProgramNotFoundException x)
+		{
+			// 2011-Feb-16 Brockman, Altering the logic here to look for one and only one default program.
+			// When accounts are provisioned, one default account is created.
+			// Any user coming in here and receiving a programNotFound Exception for the getDefault call is a 
+			//   user who has not been properly provisionined.
+			errorProvisioning(MessageUtility.looseException(x));
+			return;
+		}
+		catch (ProgramValidationException x)
+		{
+			// 2011-Feb-25 KRMT-1310: Login Chain must check and see if the default program is valid.
+			errorProvisioning(MessageUtility.looseException(x));
+			return;
+		}
+		catch (EsiNotUniqueException e)
+		{
+			errorProvisioning(MessageUtility.i18nOpsCenterX(e));
+			return;
+		}
+		catch (EsiNotFoundException e)
+		{
+			errorProvisioning(MessageUtility.i18nOpsCenterX(e));
+			e.printStackTrace();
+		}
+
+		// The only way to break out of the loop is to ensure all accounts have default programs
+
+		gettingStartedAccountList();
+	}
+
+	public static void gettingStartedAccountList() throws AbstractWebException
+	{
+		UserProgramBeanRemote userProgramEjb = SessionBeanFactory.getUserProgramBean();
+
+		// Which Accounts need their defaults set?
+		List<AccountModel> accountList = CacheUtility.requireAccountListFromGlobalCache();
+		List<AccountModel> accountsOkList = new ArrayList<AccountModel>(accountList.size());
+		List<AccountModel> accountsNeedingProgrammingList = new ArrayList<AccountModel>(accountList.size());
+
+		// Iterate over the list of accounts returned, and ensure that each has a default program.
+		for (Iterator<AccountModel> i = accountList.iterator(); i.hasNext();)
+		{
+			AccountModel account = i.next();
+			try
+			{
+				// Check for the program
+			    List<EsiDcModel> esiDcList = userProgramEjb.getDcDeviceListForAccount(account.getAccountId(), CacheUtility.getSessionTenantId());
+				UserProgramModel program = userProgramEjb.getDefaultProgramForAccount(account.getAccountId(), CacheUtility.getSessionTenantId());
+				boolean isProgramTemplateUsed = userProgramEjb.isProgramTemplateUsed(account.getAccountId(), CacheUtility.getSessionTenantId());
+				if (program == null)
+				{
+					throw new ProgramNotFoundException(DefaultResources.PRG_ERR_CODE_DEFAULT_PROGRAM_NOT_UNIQUE);
+				}
+				int programCount =
+						userProgramEjb.getAllPrograms(account.getAccountId(), CacheUtility.getSessionTenantId()).getUserProgramNameCollection().size();
+
+				for(EsiDcModel esiDc : esiDcList)
+				{
+				String deviceName = esiDc.getDeviceTypeName();
+				if(!deviceName.equals(OpsCenterConstants.DC_STORAGE_WATER_HEATER) && !deviceName.equals(OpsCenterConstants.DC_ELECTRIC_VEHICLE_CHARGER_STORAGE)
+						&& !deviceName.equals(OpsCenterConstants.DC_STORAGE_HEAT) && !deviceName.equals(OpsCenterConstants.DC_ELECTRIC_VEHICLE_CHARGER)
+						&& !deviceName.equals(OpsCenterConstants.DC_IRRIGATION_PUMP))
+				{
+				if (programCount == 0)
+				{
+					throw new ProgramNotFoundException("User Program List was valid but returned zero programs", "zero programs");
+				}
+				else if (programCount == 1 && !isProgramTemplateUsed)
+				{
+					accountsNeedingProgrammingList.add(account);
+				}
+				else
+				{
+					accountsOkList.add(account);
+				}
+				}
+				}
+
+			}
+			catch (ProgramNotFoundException x)
+			{
+				errorProvisioning(MessageUtility.looseException(x));
+				return;
+
+			}
+			catch (AbstractOpsCenterException x)
+			{
+				throw new UnexpectedException(x);
+			}
+		}
+
+		if (accountsNeedingProgrammingList.size() > 0)
+		{
+			render(accountList, accountsOkList, accountsNeedingProgrammingList);
+		}
+		else
+		{
+			complete();
+		}
+	}
+	
+	
+
+	public static void gettingStartedAccountPost(@Required int accountId, String programName)
+			throws AbstractWebException
+	{
+		// Send the user to the getting started flow for the specified account.
+		CacheUtility.storeCurrentAccountToGlobalCache(CacheUtility.requireAccountFromGlobalCache(accountId));
+
+		// No longer creating the default program, we're going to redirect to the ProgramQuestionaire
+		ProgramQaire.smartStart();
+	}
+
+	public static void errorMaintenance()
+	{
+		ConsertLogger.error("LoginChain.errorMaintenance, not letting user in: " + CacheUtility.getSessionConsertUsername());
+		render();
+	}
+
+	public static void errorAmiOnly()
+	{
+		ConsertLogger.error("LoginChain.errorAmiOnly, showing light version of UI for "
+				+ CacheUtility.getSessionConsertUsername());
+		// Dashboard.index(false);
+		render();
+	}
+	
+	public static void errorThirdPartyDeviceOnly()
+	{
+		ConsertLogger.error("LoginChain.errorThirdPartyDeviceOnly, showing light version of UI for "
+				+ CacheUtility.getSessionConsertUsername());
+		// Dashboard.index(false);
+		//String errorMessage="Account Has Only Third Party Devices Cannot Login";
+		render();
+	}
+
+	public static void errorProvisioning(String detailMessage)
+	{
+		ConsertLogger.error("LoginChain: Detected a Provisioning Error setup, not allowing user to log in: " + detailMessage);
+		render(detailMessage);
+	}
+
+	public static void errorDoNotManage() throws AbstractWebException
+	{
+		ConsertLogger.error("LoginChain.errorDoNotManage, not letting user in: " + CacheUtility.getSessionConsertUsername());
+		
+		UserProgramBeanRemote userProgramEjb = SessionBeanFactory.getUserProgramBean();
+		UserBeanRemote userEjb = SessionBeanFactory.getUserBean();
+		
+		List<AccountModel> accountList = CacheUtility.requireAccountListFromGlobalCache();
+		
+		try
+		{
+			if (null != accountList && accountList.size() > 1)
+			{
+				
+				for (AccountModel userAccount : accountList)
+				{
+					if (userEjb.isAccountInDNM(userAccount.getAccountId(), CacheUtility.getSessionTenantId()))
+					{
+						userAccount.setDoNotManage(OpsCenterConstants.TRUE);
+					}
+				}
+			}
+		}
+		catch (Exception e)
+		{
+			ConsertLogger.error("Unable to determine if account is in DNM: " + e.getMessage());
+		}
+		
+		AccountModel currentAccount = CacheUtility.requireCurrentAccountFromGlobalCache();
+		AccountModel primaryAccount = userEjb.getPrimaryAccountForUser(CacheUtility.requireUserFromGlobalCache().getUserId(), CacheUtility.getSessionTenantId());
+		
+		boolean isCurrentAccountPrimary = false;
+		
+		if(primaryAccount == null)
+		{
+			isCurrentAccountPrimary = false;
+		}
+		else if(currentAccount == null)
+		{
+		ConsertLogger.error("Error do not manage: currentAccount is not in cache for user "+ CacheUtility.requireUserFromGlobalCache().getUserId());
+		}
+		else
+		{
+			isCurrentAccountPrimary = (currentAccount.getAccountId() == primaryAccount.getAccountId())? true : false;
+		}
+		
+		render(accountList, isCurrentAccountPrimary);
+	}
+
+	public static void complete() throws AbstractWebException
+	{
+		completeLogin();
+	}
+
+	public static void errorSSO()
+	{
+		// Renders error page upon SSO exception.
+		flash.error("Unable to login via Single Sign-On");
+		render();
+	}
+	
+	private static void startLogin() throws AbstractWebException
+	{
+		// Require that the user is logged in with (Secure.class), above, and specific cache gets.
+
+		ConsertLogger.info("Login Chain is Starting...");
+
+		//Get time zone from global cache
+		UserModel user = CacheUtility.requireUserFromGlobalCache();
+
+		ConsertLogger.info("User from Cache = " + user);
+
+		// DEV-3313 If user is a Gateway Installer, redirect him to Installer home page
+		// Utility portal uses functions to determine UI access.  Do functions exist
+		// for Consumer portal?  If so, why do we use roles here?
+		if (isGatewayInstaller(user))
+		{
+			complete();
+		}
+		
+		CacheUtility.requireUserFromGlobalCache();
+		CacheUtility.requireCurrentAccountFromGlobalCache();
+
+		//KRMT-3359
+		DateTimeZone zone = user.getUserTimeZoneModel().getDateTimeZone();
+
+		ConsertLogger.info("User from Cache = " + user);
+
+		DateTime now = new DateTime();
+		DateTime checkDateTime = now.withZone(zone);
+
+		//		Integer browserReadyOffset = zone.toTimeZone().getRawOffset() / 1000 / 60;
+		Integer browserReadyOffset = zone.getOffset(checkDateTime.toInstant()) / 1000 / 60;
+
+		response.setCookie("user_tz", Integer.toString(browserReadyOffset));
+
+		checkMaintenanceModeForLogin();
+	}
+
+	
+	private static void checkMaintenanceModeForLogin() throws AbstractWebException
+	{
+		// Requirement: if the user's account is under maintenance, do not let the into the site.
+		UserLoginCombinedObject ulco = CacheUtility.requireLoginCombinedFromGlobalCache();
+
+		if (!ulco.getGatewayStatus().equalsIgnoreCase(GATEWAY_MODE_NORMAL.toLowerCase()))
+		{
+			errorMaintenance();
+		}
+
+		resetPasswordForLogin();
+	}
+	
+	private static void resetPasswordForLogin() throws AbstractWebException
+	{
+		// Do we need to reset th eusers's password?
+		UserLoginBeanRemote userEjb = SessionBeanFactory.getUserLoginBean();
+		if (!userEjb.isUserLoginAfterPasswordReset(CacheUtility.getSessionConsertUsername(), CacheUtility.getSessionTenantId()))
+		{
+			setPrimaryEmailForLogin();
+			
+		}
+
+		// Require the user to reset their password upon login.
+		// This can happen when an administrator changes the users password or the users uses the recover password functionality. 
+		resetPassword();
+	}
+	
+	private static void setPrimaryEmailForLogin() throws AbstractWebException
+	{
+		// Is this user a pre 3.1 user that had no primary email address?
+
+		UserModel user = CacheUtility.requireUserFromGlobalCache();
+		boolean requireEmailSet = true;
+
+		if (user.getEmail() != null && PasswordUtility.isEmailAddressValid(user.getEmail()))
+		{
+			requireEmailSet = false;
+		}
+
+		// KRMT-3179, Dont' rqeuire masqueradede users to reset
+		if (Session.current() != null &&
+				Session.current().get(CacheUtility.SESSION_KEY_SSO_FLAG) != null)
+		{
+			requireEmailSet = false;
+		}
+
+		if (!requireEmailSet)
+		{
+			// We're good!
+			termsAndConditionsForLogin();
+			return;
+		}
+
+		setPrimaryEmail();
+	}
+	
+	private static void termsAndConditionsForLogin() throws AbstractWebException
+	{
+		boolean userMustAgreeToTandC = true;
+
+		String msgTandC = Messages.get("register.display.termsandconditions");
+		if (msgTandC != null && !"".equals(msgTandC))
+		{
+			userMustAgreeToTandC = Boolean.parseBoolean(msgTandC);
+		}
+
+		if (!userMustAgreeToTandC)
+		{
+			announcementsForLogin();
+			return;
+		}
+
+		// Has the user already agreed?
+		UserModel user = CacheUtility.requireUserFromGlobalCache();
+
+		if (user.getTermsAgrmntFlag() != null &&
+				user.getTermsAgrmntFlag().equalsIgnoreCase(OpsCenterConstants.TRUE))
+		{
+			announcementsForLogin();
+			return;
+		}
+		// Display the T+C form
+		termsAndConditions();
+	}
+	
+	private static void announcementsForLogin() throws AbstractWebException
+	{
+		String announcement = Messages.get("lang.loginChain.announcements.content");
+		
+		if (announcement == null || announcement.length() == 0
+				|| announcement.equals("lang.loginChain.announcements.content"))
+		{
+			AccountModel currentAccount = CacheUtility.requireCurrentAccountFromGlobalCache();
+			if (currentAccount.getAmiOnlyFlag() != null && currentAccount.getAmiOnlyFlag().equals("1") ||
+					currentAccount.getCyclingOnlyAccountFlag() != null
+					&& currentAccount.getCyclingOnlyAccountFlag().equals("1"))
+			{
+				complete();
+			}
+			else
+			{
+				ensureDefaultProgramsForAllAccountsOnLogin();
+			}
+		}
+
+		// Display any announcement s/ ads the user is required to view
+		announcements();
+	}
+
+	private static void ensureDefaultProgramsForAllAccountsOnLogin() throws AbstractWebException
+	{
+		// Require that all users logging in has a default program set for their account
+		// Check all accounts and make sure there is a default program for each
+		UserProgramBeanRemote userProgramEjb = SessionBeanFactory.getUserProgramBean();
+
+		try
+		{
+			List<AccountModel> accountList = CacheUtility.requireAccountListFromGlobalCache();
+
+			// Iterate over the list of accounts returned, and ensure that each has a default program.
+			for (AccountModel account : accountList)
+			{
+				UserProgramModel program = userProgramEjb.getDefaultProgramForAccount(account.getAccountId(), CacheUtility.getSessionTenantId());
+
+				// KRMT-1451, Need to pull the correct devices for teh account to validate properly. Don't intermix devices.
+				// 2011-Feb-25 KRMT-1310: Login Chain must check and see if the default program is valid.
+				ProgramUtility.validateUserProgram(program,
+						userProgramEjb.getTstatDeviceListForAccount(account.getAccountId(), CacheUtility.getSessionTenantId()),
+						userProgramEjb.getDcDeviceListForAccount(account.getAccountId(), CacheUtility.getSessionTenantId()));
+			}
+		}
+		catch (ProgramNotFoundException x)
+		{
+			// 2011-Feb-16 Brockman, Altering the logic here to look for one and only one default program.
+			// When accounts are provisioned, one default account is created.
+			// Any user coming in here and receiving a programNotFound Exception for the getDefault call is a 
+			//   user who has not been properly provisionined.
+			errorProvisioning(MessageUtility.looseException(x));
+			return;
+		}
+		catch (ProgramValidationException x)
+		{
+			// 2011-Feb-25 KRMT-1310: Login Chain must check and see if the default program is valid.
+			errorProvisioning(MessageUtility.looseException(x));
+			return;
+		}
+		catch (EsiNotUniqueException e)
+		{
+			errorProvisioning(MessageUtility.i18nOpsCenterX(e));
+			return;
+		}
+		catch (EsiNotFoundException e)
+		{
+			errorProvisioning(MessageUtility.i18nOpsCenterX(e));
+			e.printStackTrace();
+		}
+
+		// The only way to break out of the loop is to ensure all accounts have default programs
+
+		gettingStartedAccountListForLogin();
+	}
+	
+	private static void gettingStartedAccountListForLogin() throws AbstractWebException
+	{
+		UserProgramBeanRemote userProgramEjb = SessionBeanFactory.getUserProgramBean();
+
+		// Which Accounts need their defaults set?
+		List<AccountModel> accountList = CacheUtility.requireAccountListFromGlobalCache();
+		List<AccountModel> accountsOkList = new ArrayList<AccountModel>(accountList.size());
+		List<AccountModel> accountsNeedingProgrammingList = new ArrayList<AccountModel>(accountList.size());
+
+		// Iterate over the list of accounts returned, and ensure that each has a default program.
+		for (Iterator<AccountModel> i = accountList.iterator(); i.hasNext();)
+		{
+			AccountModel account = i.next();
+			try
+			{
+				// Check for the program
+				List<EsiDcModel> esiDcList = userProgramEjb.getDcDeviceListForAccount(account.getAccountId(), CacheUtility.getSessionTenantId());
+				UserProgramModel program = userProgramEjb.getDefaultProgramForAccount(account.getAccountId(), CacheUtility.getSessionTenantId());
+				boolean isProgramTemplateUsed = userProgramEjb.isProgramTemplateUsed(account.getAccountId(), CacheUtility.getSessionTenantId());
+				if (program == null)
+				{
+					throw new ProgramNotFoundException(DefaultResources.PRG_ERR_CODE_DEFAULT_PROGRAM_NOT_UNIQUE);
+				}
+				int programCount =
+						userProgramEjb.getAllPrograms(account.getAccountId(), CacheUtility.getSessionTenantId()).getUserProgramNameCollection().size();
+				for(EsiDcModel esiDc : esiDcList)
+				{
+				String deviceName = esiDc.getDeviceTypeName();
+				if(!deviceName.equals(OpsCenterConstants.DC_STORAGE_WATER_HEATER) && !deviceName.equals(OpsCenterConstants.DC_ELECTRIC_VEHICLE_CHARGER_STORAGE)
+						&& !deviceName.equals(OpsCenterConstants.DC_STORAGE_HEAT) && !deviceName.equals(OpsCenterConstants.DC_ELECTRIC_VEHICLE_CHARGER)
+						&& !deviceName.equals(OpsCenterConstants.DC_IRRIGATION_PUMP))
+				{
+				if (programCount == 0)
+				{
+					throw new ProgramNotFoundException("User Program List was valid but returned zero programs", "zero programs");
+				}
+				else if (programCount == 1 && !isProgramTemplateUsed)
+				{
+					accountsNeedingProgrammingList.add(account);
+				}
+				else
+				{
+					accountsOkList.add(account);
+				}
+				}
+				}
+
+			}
+			catch (ProgramNotFoundException x)
+			{
+				errorProvisioning(MessageUtility.looseException(x));
+				return;
+
+			}
+			catch (AbstractOpsCenterException x)
+			{
+				throw new UnexpectedException(x);
+			}
+		}
+
+		if (accountsNeedingProgrammingList.size() > 0)
+		{
+			gettingStartedAccountList();
+		}
+		else
+		{
+			completeLogin();
+		}
+	}
+	
+	private static void completeLogin() throws AbstractWebException
+	{
+		ConsertLogger.info("[ENTER] void LoginChain.completeLogin()");
+
+		// DEV-2215 Add record to user history login for any successful user
+		// login
+		UserBeanRemote userEjb = SessionBeanFactory.getUserBean();
+
+		UserModel userModel = CacheUtility.requireUserFromGlobalCache();
+
+		try
+		{
+			userEjb.addSuccessfulLoginToUserHistory(userModel, "Successful login into Consumer portal", CacheUtility.getSessionTenantId());
+		}
+		catch (Exception e)
+		{
+			ConsertLogger.error("Failed to update user history table for login of user : "
+					+ userModel.getUsername() + e);
+		}
+		
+		// DEV-3313 If user is a Gateway Installer, redirect him to Installer home page
+		// Utility portal uses functions to determine UI access.  Do functions exist
+		// for Consumer portal?  If so, why do we use roles here?
+		if (isGatewayInstaller(userModel))
+		{
+			Installer.home();
+		}
+
+		ConsertLogger.info("[ EXIT] LoginChain.completeLogin");
+
+		// Redirect the user to the dashboard
+		Dashboard.index(false);
+	}
+
+	/**
+	 * @param user
+	 * @return
+	 */
+	private static boolean isGatewayInstaller(UserModel user)
+	{
+		if (user.getRoles() != null)
+		{
+			for (RoleModel role : user.getRoles())
+			{
+				if (role.getRoleId() == OpsCenterConstants.USER_ROLE_GATEWAY_INSTALLER)
+				{
+					return true;
+				}
+			}
+		}
+
+		return false;
+	}
+}

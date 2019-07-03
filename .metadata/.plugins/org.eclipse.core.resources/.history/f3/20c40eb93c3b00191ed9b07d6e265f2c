@@ -1,0 +1,25 @@
+package com.demo.binarytree;
+
+public class BinarySearchTree {
+	
+	private TreeNode root;
+	
+	public void insert(Integer data)
+	{
+		TreeNode newNode = new TreeNode(data);
+	}
+	
+	public TreeNode find(Integer data)
+	{
+		if(root!=null)
+			root.find(data);
+		
+		return null;
+	}
+	
+	public void delete(Integer data)
+	{
+		
+	}
+
+}

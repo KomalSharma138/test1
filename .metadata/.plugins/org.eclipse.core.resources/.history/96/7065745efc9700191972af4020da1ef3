@@ -1,0 +1,406 @@
+package com.consert.core.model.validator;
+
+import java.awt.Point;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+
+import org.joda.time.Interval;
+
+import com.consert.core.ejb.constant.OpsCenterConstants;
+import com.consert.core.ejb.exception.ProgramTemplateException;
+import com.consert.core.model.ProgramTemplateDCTransitionPointModel;
+import com.consert.core.model.ProgramTemplateModel;
+import com.consert.core.model.ProgramTemplateProgramModel;
+import com.consert.core.model.ProgramTemplateScheduleMonthDayModel;
+import com.consert.core.model.ProgramTemplateScheduleRangeModel;
+import com.consert.core.model.ProgramTemplateTstatTransitionPointModel;
+
+
+//RDRN-116 Validation Requirements
+public class ProgramTemplateModelValidator {
+	
+	public boolean validateModelObject(ProgramTemplateModel ptModel) throws Exception
+	{
+		validateProgramTemplate(ptModel);
+		
+		return true;
+	}
+	
+	private boolean validateProgramTemplate(ProgramTemplateModel ptModel) throws Exception
+	{
+				
+		//- Limit program and template name to 30 alphanumeric chars. Special characters will not be supported. 
+		if (null == ptModel.getName() || 30 < ptModel.getName().length())
+		{
+			throw new ProgramTemplateException("The program template name must be set to a value with a maximum of 30 chars.");
+		}
+		
+		//- There is a minimum of one program but no maximum for the number of programs in a template. 
+		if (null == ptModel.getProgramTemplateProgramCollection() || 0 >= ptModel.getProgramTemplateProgramCollection().size())
+		{
+			throw new ProgramTemplateException("The program template must have at least one program.");
+		}
+		
+		validatePrograms(ptModel.getProgramTemplateProgramCollection());
+		
+		return true;
+	}
+
+	
+	public boolean validatePrograms(List<ProgramTemplateProgramModel> ptpModels) throws Exception
+	{
+		Set<String> ptpNames = new HashSet<String>();
+		List<ProgramTemplateScheduleMonthDayModel> programTemplateScheduleMonthDayCollection = new ArrayList<ProgramTemplateScheduleMonthDayModel>();
+		List<ProgramTemplateScheduleRangeModel> programTemplateScheduleRangeCollection = new ArrayList<ProgramTemplateScheduleRangeModel>();
+		for (ProgramTemplateProgramModel ptpModel : ptpModels)
+		{
+			//- Limit program and template name to 30 alphanumeric chars. Special characters will not be supported. 
+			if (null == ptpModel.getName() || 30 < ptpModel.getName().length())
+			{
+				throw new ProgramTemplateException("The program name " + ptpModel.getName() + " must be set to a value with a maximum of 30 chars.");
+			}
+			
+			//The names of the programs will be unique, ignoring case, to other programs within the same template.
+			if (!ptpNames.add(ptpModel.getName().toLowerCase()))
+			{
+				throw new ProgramTemplateException("The names of the programs must be unique to the program template. "
+						+ ptpModel.getName() + " is not a unique name.");
+			}
+			
+			if (null == ptpModel.getProgramTemplateScheduleMonthDayModel() && null == ptpModel.getProgramTemplateScheduleRangeCollection())
+			{
+				throw new ProgramTemplateException("The program " + ptpModel.getName() + " must have scheduled month and date range.");
+			}
+			if(ptpModel.getSchedByRangeFlag().equals(OpsCenterConstants.TRUE) && ptpModel.getProgramTemplateScheduleRangeCollection()!=null && !ptpModel.getProgramTemplateScheduleRangeCollection().isEmpty())
+			{
+				validateUserProgramSchedules(ptpModel.getProgramTemplateScheduleRangeCollection());
+			}
+			else
+			{
+			programTemplateScheduleMonthDayCollection.add(ptpModel.getProgramTemplateScheduleMonthDayModel());
+			}
+			
+			validateTstatTransitionPoints(ptpModel.getName(),ptpModel.getProgramTemplateTstatTransitionPointCollection());
+			
+			validateDcTranistionPoints(ptpModel.getName(),ptpModel.getProgramTemplateDcTransitionPointCollection());
+			
+		}
+		if(programTemplateScheduleMonthDayCollection != null && !programTemplateScheduleMonthDayCollection.isEmpty())
+		validateScheduleMonthDays(programTemplateScheduleMonthDayCollection);
+		return true;
+	}
+	
+	private boolean validateUserProgramSchedules(
+			List<ProgramTemplateScheduleRangeModel> programTemplateScheduleRangeCollection) throws Exception {
+		
+		HashMap<String, Interval> programIntervalPile = new HashMap<String, Interval>();
+		for (ProgramTemplateScheduleRangeModel psr : programTemplateScheduleRangeCollection)
+		{
+
+			// note that program schedules are End Date inclusive.
+			Interval i = new Interval(psr.getStartDate().toDateTimeAtStartOfDay(), psr
+					.getEndDate().plusDays(1).toDateTimeAtStartOfDay());
+
+			for (Map.Entry<String, Interval> entry : programIntervalPile.entrySet())
+			{
+				String existName = entry.getKey();
+				Interval exist = entry.getValue();
+
+				// Any collisions?
+
+				if (exist.overlaps(i))
+				{
+				throw new ProgramTemplateException("Multiple program schedules overlap on the same days " + existName + " " + exist
+						.getStart().toString("MM/dd/yyyy") + " " + exist.getEnd().minusDays(1).toString("MM/dd/yyyy"));
+				}
+			}
+			
+			programIntervalPile.put(p.getName(), i);
+
+		}
+		
+		return true;
+		
+	}
+
+	private boolean validateScheduleMonthDays(List<ProgramTemplateScheduleMonthDayModel> schModels) throws Exception
+	{
+		
+		Set<Point> selectedMonthDays = new HashSet<Point>(); 
+		
+		//Program month/day combination will be unique to the template. 
+		for (ProgramTemplateScheduleMonthDayModel schModel : schModels)
+		{
+			//Playing a form of "Battleship" to see if any overlays exist.
+			List<Integer> selectedMonths = getSelectedMonths(schModel);
+			List<Integer> selectedDays = getSelectedDays(schModel);
+			
+			for (Integer selectedMonth : selectedMonths)
+			{
+				for (Integer selectedDay : selectedDays)
+				{
+					Point selectedMonthDay = new Point(selectedMonth, selectedDay);
+					if (!selectedMonthDays.add(selectedMonthDay))
+					{
+						throw new ProgramTemplateException ("There are multiple month/day combinations set for " + selectedMonth + "/" + selectedDay + ".");
+					}
+				}
+			}
+			
+			
+		}
+		
+		//Specific day programs can be created but not assigned a date range. - There are no date assignments in the database so there's nothing to validate. 
+		
+		return true;
+	}
+	
+	private List<Integer> getSelectedDays(ProgramTemplateScheduleMonthDayModel schModel)
+	{
+		String checkedDay = "1";
+		List<Integer> selectedDays = new ArrayList<Integer>();
+		
+		if (checkedDay.equalsIgnoreCase(schModel.getSun()))
+		{
+			selectedDays.add(1);
+		}
+		
+		if (checkedDay.equalsIgnoreCase(schModel.getMon()))
+		{
+			selectedDays.add(2);
+		}
+		
+		if (checkedDay.equalsIgnoreCase(schModel.getTue()))
+		{
+			selectedDays.add(3);
+		}
+		
+		if (checkedDay.equalsIgnoreCase(schModel.getWed()))
+		{
+			selectedDays.add(4);
+		}
+		
+		if (checkedDay.equalsIgnoreCase(schModel.getThu()))
+		{
+			selectedDays.add(5);
+		}
+		
+		if (checkedDay.equalsIgnoreCase(schModel.getFri()))
+		{
+			selectedDays.add(6);
+		}
+		
+		if (checkedDay.equalsIgnoreCase(schModel.getSat()))
+		{
+			selectedDays.add(7);
+		}
+		
+		return selectedDays;
+	}
+	
+	
+	private List<Integer> getSelectedMonths(ProgramTemplateScheduleMonthDayModel schModel)
+	{
+		String checkedMonth = "1";
+		List<Integer> selectedMonths = new ArrayList<Integer>();
+		if (checkedMonth.equalsIgnoreCase(schModel.getJan()))
+		{
+			selectedMonths.add(1);
+		}
+		
+		if (checkedMonth.equalsIgnoreCase(schModel.getFeb()))
+		{
+			selectedMonths.add(2);
+		}
+		
+		if (checkedMonth.equalsIgnoreCase(schModel.getMar()))
+		{
+			selectedMonths.add(3);
+		}
+		
+		if (checkedMonth.equalsIgnoreCase(schModel.getApr()))
+		{
+			selectedMonths.add(4);
+		}
+		
+		if (checkedMonth.equalsIgnoreCase(schModel.getMay()))
+		{
+			selectedMonths.add(5);
+		}
+		
+		if (checkedMonth.equalsIgnoreCase(schModel.getJun()))
+		{
+			selectedMonths.add(6);
+		}
+		
+		if (checkedMonth.equalsIgnoreCase(schModel.getJul()))
+		{
+			selectedMonths.add(7);
+		}
+		
+		if (checkedMonth.equalsIgnoreCase(schModel.getAug()))
+		{
+			selectedMonths.add(8);
+		}
+		
+		if (checkedMonth.equalsIgnoreCase(schModel.getSep()))
+		{
+			selectedMonths.add(9);
+		}
+		
+		if (checkedMonth.equalsIgnoreCase(schModel.getOct()))
+		{
+			selectedMonths.add(10);
+		}
+		
+		if (checkedMonth.equalsIgnoreCase(schModel.getNov()))
+		{
+			selectedMonths.add(11);
+		}
+		
+		if (checkedMonth.equalsIgnoreCase(schModel.getDec()))
+		{
+			selectedMonths.add(12);
+		}
+		return selectedMonths;
+	}
+	
+	private boolean validateTstatTransitionPoints(String programName,List<ProgramTemplateTstatTransitionPointModel> tpModels) throws Exception
+	{
+		List<Integer> tpTimes = new ArrayList<Integer>();
+		//- The minimum transition points for a program is 1.
+		if (null == tpModels || 0 >= tpModels.size())
+		{
+			throw new ProgramTemplateException(programName + ": Each program must have at least one transition point for the tstat.");
+		}
+		
+		//- The maximum transition points for a program is 7.
+		if (7 < tpModels.size())
+		{
+			throw new ProgramTemplateException(programName + ": The tstat program cannot have more than 7 transition points.");
+		}
+		
+		// Two transition points cannot be for the same time.
+		for (ProgramTemplateTstatTransitionPointModel tpModel : tpModels)
+		{
+			for (Integer tpTime : tpTimes)
+			{
+				if (tpTime == tpModel.getTpTime().getMillisOfDay())
+				{
+					throw new ProgramTemplateException(programName + ": The time for each tstat transition point must be unique.");
+				}
+			}
+			tpTimes.add(tpModel.getTpTime().getMillisOfDay());
+		}
+		// - The interval between TP's is 15 minutes.
+		
+		Collections.sort(tpTimes);
+		
+		Integer lastTpTime = null;
+		
+		for (Integer tpTime : tpTimes)
+		{
+			if (null == lastTpTime)
+			{
+				lastTpTime = tpTime;
+			}
+			else
+			{
+				int diffBetweenTimes = tpTime - lastTpTime;
+				if (900000 > diffBetweenTimes)
+				{
+					throw new ProgramTemplateException(programName + ": The minimum amount of time between transition points is 15 minutes.");
+				}
+				
+			}
+		}
+		
+		return true;
+	}
+	
+	private boolean validateDcTranistionPoints(String programName,List<ProgramTemplateDCTransitionPointModel> tpModels) throws Exception
+	{
+		List<Integer> tpTimes = new ArrayList<Integer>();
+
+		
+		//- The maximum transition points for a program is 7.
+		Map<Integer, Integer> tpCountsForDevice = new HashMap<Integer, Integer>();
+		for (ProgramTemplateDCTransitionPointModel tpModel : tpModels)
+		{
+			Integer deviceType = tpModel.getDeviceType().getDeviceTypeId();
+			Integer tpCountForDeviceType = tpCountsForDevice.get(deviceType);
+			if (null == tpCountForDeviceType)
+			{
+				tpCountsForDevice.put(deviceType, 1);
+			}
+			else if(7 == tpCountForDeviceType)
+			{
+				throw new ProgramTemplateException(programName + ": The program cannot have more than 7 transition points for a device type.");
+			}
+			else
+			{
+				tpCountsForDevice.put(deviceType, tpCountForDeviceType++);
+			}
+			
+		}
+		
+		Integer whTpCount = tpCountsForDevice.get(OpsCenterConstants.DEVICE_TYPE_ID_WH);
+		Integer ppTpCount = tpCountsForDevice.get(OpsCenterConstants.DEVICE_TYPE_ID_PP);
+		
+		//- The minimum transition points for each device type is 1.
+		if (null == ppTpCount || 0 >= ppTpCount || null == whTpCount || 0 >= whTpCount)
+		{
+			throw new ProgramTemplateException(programName + ": Each device type must have at least one transition point for program.");
+		}
+		
+			
+		// Two transition points cannot be for the same time for the same device type.
+		for(Integer deviceTypeId : OpsCenterConstants.programTemplateSupportedDeviceIdList) {
+			for (ProgramTemplateDCTransitionPointModel tpModel : tpModels)
+			{
+				for (Integer tpTime : tpTimes)
+				{
+					if (tpTime == tpModel.getTpTime().getMillisOfDay()
+							&& deviceTypeId == tpModel.getDeviceType().getDeviceTypeId())
+					{
+						throw new ProgramTemplateException(programName + ": The time for each device transition point must be unique.");
+					}
+				}
+				if(deviceTypeId == tpModel.getDeviceType().getDeviceTypeId()) {
+					tpTimes.add(tpModel.getTpTime().getMillisOfDay());
+				}
+			}
+			// - The interval between TP's is 15 minutes.
+			
+			Collections.sort(tpTimes);
+			
+			Integer lastTpTime = null;
+			
+			for (Integer tpTime : tpTimes)
+			{
+				if (null == lastTpTime)
+				{
+					lastTpTime = tpTime;
+				}
+				else
+				{
+					int diffBetweenTimes = tpTime - lastTpTime;
+					if (900000 > diffBetweenTimes)
+					{
+						throw new ProgramTemplateException(programName + ": The minimum amount of time between transition points is 15 minutes.");
+					}
+					
+				}
+			}
+			tpTimes.clear();
+		}
+		
+		return true;
+	}
+
+}

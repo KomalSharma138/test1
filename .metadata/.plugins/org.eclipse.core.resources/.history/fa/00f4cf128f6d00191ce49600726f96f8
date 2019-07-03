@@ -1,0 +1,281 @@
+package com.consert.core.startup;
+
+import java.io.IOException;
+import java.util.TimeZone;
+
+import javax.annotation.PostConstruct;
+import javax.annotation.PreDestroy;
+import javax.ejb.EJB;
+import javax.ejb.Singleton;
+import javax.ejb.Startup;
+
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import com.consert.core.ejb.multitenant.TenantContext;
+import com.consert.core.ejb.session.CacheLoader;
+import com.consert.core.ejb.session.CacheManagerBean;
+import com.consert.core.ejb.session.CassandraBean;
+import com.consert.core.ejb.session.ControlEventNotificationBean;
+import com.consert.core.ejb.session.ProvisioningNotificationBean;
+import com.consert.core.ejb.session.interfaces.local.DeviceConfigurationBeanLocal;
+import com.consert.core.ejb.session.schedulers.AccountSyncTaskSchedulerBean;
+import com.consert.core.ejb.session.schedulers.AlertMissingReadsTaskSchedulerBean;
+import com.consert.core.ejb.session.schedulers.ControlEventPowerTaskSchedulerBean;
+import com.consert.core.ejb.session.schedulers.GatewayMessagingWorkflowTimeoutTaskSchedulerBean;
+import com.consert.core.ejb.session.schedulers.GsProvisioningPingTaskSchedulerBean;
+import com.consert.core.ejb.session.schedulers.GsisHealthSchedulerBean;
+import com.consert.core.ejb.session.schedulers.HazelCastScheduler;
+import com.consert.core.ejb.session.schedulers.MasterSyncTaskSchedulerBean;
+import com.consert.core.ejb.session.schedulers.SendProgramTaskSchedulerBean;
+import com.consert.core.ejb.session.schedulers.SystemValidationSchedulerBean;
+import com.consert.core.throttling.ThrottlingJobScheduler;
+import com.consert.core.utils.TenantPropertyUtil;
+import com.consert.service.ns.consertaccountbillingusage.ConsertAccountBillingUsageLocal;
+import com.consert.service.ns.consertaccountprovisioning.UtilityIntegrationUnprovisionedDeviceNotifier;
+import com.consert.service.ns.consertconservationeventmanagement.UtilityIntegrationCeStatusChangeNotifier;
+import com.hazelcast.core.Hazelcast;
+import com.hazelcast.core.HazelcastInstance;
+
+/**
+ * Bean implementation class for Enterprise Bean: Startup
+ */
+@Startup
+@Singleton
+public class StartupBean
+{
+	static final long serialVersionUID = 3206093459760846163L;
+
+	private static final Logger logger = LoggerFactory.getLogger(StartupBean.class);
+	
+	static {
+		System.setProperty("net.sf.ehcache.skipUpdateCheck", "true");
+	}
+	
+	@EJB
+	private CacheManagerBean cacheBean;
+	
+	@EJB
+	private CacheLoader cacheLoader;
+	
+	@EJB
+	private DeviceConfigurationBeanLocal deviceConfigBean;
+
+	@EJB
+	private AccountSyncTaskSchedulerBean accountSyncTaskBean;
+
+	@EJB
+	private ControlEventPowerTaskSchedulerBean controlEventPowerTaskBean;
+
+	@EJB
+	private  GatewayMessagingWorkflowTimeoutTaskSchedulerBean gatewayMessagingWorkflowTimeoutBean;
+	
+	@EJB
+	private  GsProvisioningPingTaskSchedulerBean gsProvisioningTaskBean;
+	
+	@EJB
+	private AlertMissingReadsTaskSchedulerBean alertMissingReadsBean;
+
+	@EJB
+	private  SendProgramTaskSchedulerBean sendProgramTaskBean;
+
+	@EJB
+	private  SystemValidationSchedulerBean systemValidationTaskBean;
+	
+	@EJB
+	private ThrottlingJobScheduler throttlingJobScheduler;
+	
+	@EJB
+	CassandraBean cassandraBean;
+
+	@EJB
+	ControlEventNotificationBean controlEventNotificationBean;
+	
+	@EJB
+	ProvisioningNotificationBean provisioningNotificationBean;
+	
+	@EJB
+	ConsertAccountBillingUsageLocal consertAccountBillingUsage;
+
+	@EJB
+	MasterSyncTaskSchedulerBean  masterSyncTaskScheduler;
+	
+	@EJB
+	GsisHealthSchedulerBean gsisHealthSchedulerBean;
+	
+	@PostConstruct
+	public void init() throws Exception
+	{
+		logger.info("Startup Bean has been started");
+		
+		//Load TenantCCMapping.properties file from jboss server configuration
+		try {
+			TenantPropertyUtil.loadTenantMapping();
+		} 
+		catch (IOException e) {
+			logger.error("Exception occured while fetching the tenant properties", e);
+			throw e;
+		}
+		catch (Exception e) {
+			logger.error("Exception occured while fetching the tenant properties", e);
+			throw e;
+		}
+		
+		logger.debug("Using timezone " + TimeZone.getDefault().getDisplayName());
+		
+		for( String tenantId : TenantPropertyUtil.tenantIdNameMap.keySet()){
+			TenantContext.setCurrentTenant(Integer.valueOf(tenantId));
+			try
+			{
+				
+				//these are legacy meter codes, not needed for GS
+				//String message = cacheReaderBean.addMeterEventStaticData();
+				//logger.info("Adding Event Code data to cache complete: \n" + message);
+				logger.info("Allow cache to synch across clones for tenantId : "+tenantId);			
+				updateCacheOnCloneForTenant(tenantId);
+				
+				cassandraBean.initProperties();
+	 
+				startSchedulerTasks(tenantId);
+				
+			}
+			catch (Exception e)
+			{
+				logger.error("CacheReaderBeanLocal, couldnt start all task, fatal error", e);
+			}
+	
+			initializeControlEventNotificationBean();
+			
+			initializeProvisioningNotificationBean();
+			
+			loadDeviceConfigCategories();
+			
+			consertAccountBillingUsage.reassociateAccountCeGroupsIfNotFlagged();
+			
+			TenantContext.setCurrentTenant(null);
+		}
+	}
+
+	private void initializeControlEventNotificationBean() {
+		controlEventNotificationBean.registerStatusChangeHandler(new UtilityIntegrationCeStatusChangeNotifier());
+	}
+	
+	private void initializeProvisioningNotificationBean() {
+		provisioningNotificationBean.registerUnprovisionedDeviceEventHandler(new UtilityIntegrationUnprovisionedDeviceNotifier());
+	}
+
+
+	private void loadDeviceConfigCategories() {
+		try
+		{
+			logger.info("Loading DeviceConfigurationBean categories from StartupBean.");
+			deviceConfigBean.loadAllConfigCategoryModels();
+		}
+		catch (Exception e)
+		{
+			logger.error("Exception occured while loading DeviceConfigurationBean categories.", e);
+		}
+	}
+
+	private void startSchedulerTasks(String tenantId) {
+ 
+ 
+		logger.info("Starting first scheduled task on Master Server");
+		
+		//start HazelCast Scheduler first
+		HazelCastScheduler.getScheduler();
+	
+		accountSyncTaskBean.start(tenantId);
+
+		controlEventPowerTaskBean.start(tenantId);
+
+		gatewayMessagingWorkflowTimeoutBean.start(tenantId);
+
+		gsProvisioningTaskBean.start(tenantId);
+
+		alertMissingReadsBean.start(tenantId);
+
+		sendProgramTaskBean.start(tenantId);
+
+		throttlingJobScheduler.init(tenantId);
+		
+		masterSyncTaskScheduler.start(tenantId);
+		
+//		gsisHealthSchedulerBean.start(tenantId);
+		
+
+		logger.info("Started last scheduled task");
+
+	}
+
+	@PreDestroy
+	public void stop()
+	{
+		logger.info("Startup Bean has been stopped");
+
+		HazelcastInstance instance = HazelCastScheduler.getInstance();
+		instance.shutdown();
+		HazelCastScheduler.shutdownScheduler();
+		Hazelcast.shutdownAll();
+		logger.info("Hazelcast Scheduler has been shut down");
+
+ 	}
+
+
+	private void updateCacheOnCloneForTenant(String tenantId)
+	{
+		logger.debug("Loading cache for tenant id = "+tenantId);
+		cacheBean.loadCacheForTenantId(Integer.valueOf(tenantId));
+		int count = 0;
+		// time for caches to sync up.
+		while (count < 1)
+		{
+			try
+			{
+				count++;
+				Thread.sleep(10 * 1000L);
+
+				final boolean breakOut;
+				if (cacheBean.getGwEsiCache().getSize() < 1)
+				{
+					logger.debug("Loading GS cache for tenantID : "+tenantId);
+					try
+			    	{
+			    		cacheLoader.loadCacheForGS();
+			    	}
+			    	catch (Exception e)
+			    	{
+			    		logger.error(e.getMessage(), e);
+			    	}
+					cacheBean.cacheGatewayAndEsiDataDuringInit();
+					breakOut = true;
+				}
+				else
+				{
+					breakOut = false;
+				}
+				// moved to AccountSyncTaskScheduler due to thread
+				// timeout--DEV-175
+				/*	if (getCacheBean().getAccountSyncCache().getSize() < 1) {
+						getCacheBean().cacheAccountSyncDataDuringInit();
+					}	*/
+				logger.warn("Count = " + count + " GwDCCache size = "
+						+ cacheBean.getGwDCCache().getSize()
+						+ " GwEsiCache size = "
+						+ cacheBean.getGwEsiCache().getSize()
+						+ " AccountSync size = "
+						+ cacheBean.getAccountSyncCache().getSize());
+				if (breakOut)
+				{
+					break;
+				}
+			}
+			catch (Exception ex)
+			{
+				logger.error("Exception accessing Cache, count = " + count,  ex);
+			}
+		}
+			
+	}
+
+}

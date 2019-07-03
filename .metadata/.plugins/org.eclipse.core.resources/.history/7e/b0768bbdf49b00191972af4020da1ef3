@@ -1,0 +1,846 @@
+package models;
+
+import java.io.Serializable;
+import java.io.UnsupportedEncodingException;
+import java.net.URLEncoder;
+import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.stream.Collectors;
+
+import org.joda.time.DateTime;
+import org.joda.time.DateTimeZone;
+import org.joda.time.LocalTime;
+import org.slf4j.MDC;
+
+import com.consert.core.ejb.constant.DefaultResources;
+import com.consert.core.ejb.constant.OpsCenterConstants;
+import com.consert.core.ejb.exception.AbstractOpsCenterException;
+import com.consert.core.ejb.exception.DataNotAvailableException;
+import com.consert.core.ejb.exception.EsiGatewayNotNormalMode;
+import com.consert.core.ejb.exception.TransitionPointNotFoundException;
+import com.consert.core.ejb.session.interfaces.ControlEventPowerBeanRemote;
+import com.consert.core.ejb.session.interfaces.UserLoginBeanRemote;
+import com.consert.core.ejb.session.interfaces.UserProgramBeanRemote;
+import com.consert.core.model.AccountModel;
+import com.consert.core.model.ControlEventModel;
+import com.consert.core.model.DMConfigModel;
+import com.consert.core.model.DMConfigModel.DmDeviceModel;
+import com.consert.core.model.DMConfigModel.DmMeterSettingModel;
+import com.consert.core.model.DcCurrentReadingModel;
+import com.consert.core.model.EsiDcModel;
+import com.consert.core.model.EsiTstatModel;
+import com.consert.core.model.TstatCurrentReadingModel;
+import com.consert.core.model.UserLoginCombinedObject;
+import com.consert.core.model.UserModel;
+import com.consert.core.model.UserProgramModel;
+import com.consert.core.model.UserProgramName;
+import com.consert.core.model.UserProgramNameModel;
+import com.consert.web.auth.jsonsso.JsonAssertionSimple2011Apr;
+import com.consert.web.auth.jsonsso.JsonSsoUtility;
+import com.consert.web.exception.AbstractWebException;
+import com.consert.web.exception.ApplicationConfException;
+import com.consert.web.exception.ProgramValidationException;
+import com.consert.web.exception.SecurityUserFunctionRequiredException;
+import com.consert.web.exception.SsoCryptoException;
+import com.consert.web.exception.SsoValidationException;
+import com.consert.web.program.ProgramUtility;
+import com.consert.web.util.CacheUtility;
+import com.consert.web.util.SessionBeanFactory;
+import com.google.gson.JsonArray;
+import com.google.gson.JsonObject;
+
+import controllers.json.JsonComfort;
+import models.JsonDMModel.JsonDmDeviceModel;
+import play.Logger;
+import play.exceptions.UnexpectedException;
+import play.i18n.Messages;
+
+/**
+ * Sweb integration - refactoing logic for the single login API service to a common location
+ */
+
+public class ConsertConsumerRestApiHelper implements Serializable
+{
+	private static final long serialVersionUID = 8654311031534228531L;
+	public static final Set<Integer> skippedLcsDeviceList = new HashSet<>();
+	static {
+	//	skippedLcsDeviceList.add(OpsCenterConstants.DEVICE_TYPE_ID_IRRIGATION_PUMP);
+		skippedLcsDeviceList.add(OpsCenterConstants.DEVICE_TYPE_ID_CROP_HEAT);
+		skippedLcsDeviceList.add(OpsCenterConstants.DEVICE_TYPE_ID_GENERATOR);
+	}
+
+	public ConsertConsumerRestApiHelper()
+	{
+	}
+
+	/**
+	 * WARNING: This method has side effects - certain elements are stored in the cache
+	 */
+	public boolean authenticateJsonSsoAssertion(String authAssertion)
+			throws SsoCryptoException, ApplicationConfException, SsoValidationException
+	{
+		Logger.info("[ConsertConsumerRestApiHelper] Decoding Assertion: " + authAssertion);
+
+		JsonAssertionSimple2011Apr validAssertion =
+				JsonSsoUtility.jsonToAssertion(JsonSsoUtility.cryptedBase64ToJson(authAssertion));
+
+		if (JsonSsoUtility.validateAssertion(validAssertion))
+		{
+			Logger.info("JsonSecure.jsonSso: Acccepted valid assertion : " + validAssertion);
+
+			CacheUtility.setSessionPlayUsername_ForMasqueradeOnly(validAssertion
+					.getIssuerUsername());
+			CacheUtility.setSessionConsertUsername(validAssertion.getIssuerUsername());
+			
+			if(validAssertion.getIssuerUsername()!=null && validAssertion.getTenantId()!=null) {
+			Logger.info("JsonSecure.jsonSso: Setting Tenant Id"+ validAssertion.getTenantId());	
+			CacheUtility.setSessionTenantId(Integer.parseInt(validAssertion.getTenantId()));
+			}
+			
+			// Store the inbound Assertion into the Cache.
+			CacheUtility.storeActiveSsoAssertionToGlobalCache(validAssertion);
+
+			return true;
+			// NOT following intent in the JSON sse case.
+		}
+
+		return false;
+	}
+
+	public JsonOutboundControlEventDetails findActiveCE()
+			throws AbstractWebException
+	{
+		// Is the user in a control event?
+		ControlEventModel controlEvent = null;
+
+		// KRMT-2250 get actual devices for account
+		int whCnt = 0;
+		int ppCnt = 0;
+		int tstatCnt = 0;
+		int hsCnt = 0;
+		int shCnt = 0;
+		int dhCnt = 0;
+		int irrigationPumpCount = 0;
+		int cropHeatCount = 0;
+		int generatorCount = 0;
+		int swhCount = 0;
+		int sthCount = 0;
+		int evcCount = 0;
+		int evcsCount = 0;
+
+		try
+		{
+			// get the real device list.
+			AccountModel account = CacheUtility.requireCurrentAccountFromGlobalCache();
+			UserProgramBeanRemote userProgramEjb = SessionBeanFactory.getUserProgramBean();
+			List<EsiDcModel> dcModelList = userProgramEjb.getDcDeviceListForAccount(account
+					.getAccountId(), CacheUtility.getSessionTenantId());
+			List<EsiTstatModel> tstatModelList = userProgramEjb
+					.getTstatDeviceListForAccount(account.getAccountId(), CacheUtility.getSessionTenantId());
+
+			// get device info
+			// tstatCnt = tstatModelList.size();
+
+			for (EsiTstatModel tstat : tstatModelList)
+			{
+				if (tstat.isInActiveCe())
+				{
+					tstatCnt++;
+				}
+			}
+
+			for (EsiDcModel dc : dcModelList)
+			{
+				String deviceType = dc.getDeviceTypeName();
+				if (dc.isInActiveCe())
+				{
+					if (OpsCenterConstants.DC_POOL_PUMP.equals(deviceType))
+					{
+						ppCnt++;
+					}
+					if (OpsCenterConstants.DC_WATER_HEATER.equals(deviceType))
+					{
+						whCnt++;
+					}
+					if (OpsCenterConstants.DC_HVAC_SWITCH.equals(deviceType))
+					{
+						hsCnt++;
+					}
+					if (OpsCenterConstants.DC_SINGLE_HEAT.equals(deviceType))
+					{
+						shCnt++;
+					}
+					if (OpsCenterConstants.DC_DUAL_HEAT.equals(deviceType))
+					{
+						dhCnt++;
+					}
+					if (OpsCenterConstants.DC_IRRIGATION_PUMP.equals(deviceType))
+					{
+						irrigationPumpCount++;
+					}
+					if (OpsCenterConstants.DC_CROP_HEAT.equals(deviceType))
+					{
+						cropHeatCount++;
+					}
+					if (OpsCenterConstants.DC_GENERATOR.equals(deviceType))
+					{
+						generatorCount++;
+					}
+					if (OpsCenterConstants.DC_STORAGE_WATER_HEATER.equals(deviceType))
+					{
+						swhCount++;
+					}
+					if (OpsCenterConstants.DC_STORAGE_HEAT.equals(deviceType))
+					{
+						sthCount++;
+					}
+					if (OpsCenterConstants.DC_ELECTRIC_VEHICLE_CHARGER.equals(deviceType))
+					{
+						evcCount++;
+					}
+					if (OpsCenterConstants.DC_ELECTRIC_VEHICLE_CHARGER_STORAGE.equals(deviceType))
+					{
+						evcsCount++;
+					}
+				}
+			}
+		}
+		catch (Exception x)
+		{
+			Logger.error(x, "JsonResponse, Generic Exception");
+			throw new UnexpectedException(x);
+		}
+
+		UserLoginCombinedObject ulco;
+		ulco = CacheUtility.requireLoginCombinedFromGlobalCache();
+
+		if (ulco.getCeId() > 0)
+		{
+			ControlEventPowerBeanRemote ceEjb = SessionBeanFactory.getControlEventPowerBean();
+			controlEvent = ceEjb.getControlEventDetails(ulco.getCeId(), CacheUtility.getSessionTenantId());
+		}
+
+		if (controlEvent != null)
+		{
+			// Reduce the visibility of the data for teh Json service. We don't
+			// want to be sending
+			// full account groups + ce details to every users's browser,
+			// security risk.
+			JsonOutboundControlEventDetails ceOut = new JsonOutboundControlEventDetails();
+			ceOut.setCeId(controlEvent.getCeId());
+			ceOut.setCritical(
+					controlEvent.getCriticalFlag() != null
+							&&
+							controlEvent.getCriticalFlag()
+									.equalsIgnoreCase(OpsCenterConstants.TRUE));
+
+			// KRMT-1873: The ULCO opt out flag means if the user is allowed to
+			// opt out or not. Logic reverse.
+			ceOut.setOptedOut(ulco.getOptOut() == null
+					|| !ulco.getOptOut().equalsIgnoreCase(OpsCenterConstants.TRUE));
+			ceOut.setStartTime(controlEvent.getStartTime());
+			ceOut.setStopTime(controlEvent.getStopTime());
+
+			// ceOut.getIncludedDeviceTypeIDs().addAll(controlEvent.getIncludedDeviceTypeIds());
+			// KRMT-2250 Only add device types for devices this account actually
+			// has
+
+			Logger.info("Devices still in CE " + controlEvent.getCeId()
+					+ " for this account : tstatCnt = " + tstatCnt + ", ppCnt = " + ppCnt
+					+ ", whCnt = " + whCnt + ", irrigationPumpCount = " + irrigationPumpCount
+					+ ", hsCnt = " + hsCnt + ", shCnt = " + shCnt + ", dhCnt = " + dhCnt
+					+ ", cropHeatCount = " + cropHeatCount + ", generatorCount = " + generatorCount + ", swhCount = " + swhCount
+					+ ", sthCount = " + sthCount + ", evcCount = " + evcCount + ", evcsCount = " + evcsCount);
+
+			if (tstatCnt > 0
+					&& controlEvent.getIncludedDeviceTypeIds().contains(OpsCenterConstants.HVAC))
+			{
+				ceOut.getIncludedDeviceTypeIDs().add(OpsCenterConstants.HVAC);
+			}
+			if (ppCnt > 0
+					&& controlEvent.getIncludedDeviceTypeIds().contains(OpsCenterConstants.PP))
+			{
+				ceOut.getIncludedDeviceTypeIDs().add(OpsCenterConstants.PP);
+			}
+			if (whCnt > 0
+					&& controlEvent.getIncludedDeviceTypeIds().contains(OpsCenterConstants.WH))
+			{
+				ceOut.getIncludedDeviceTypeIDs().add(OpsCenterConstants.WH);
+			}
+			if (hsCnt > 0
+					&& controlEvent.getIncludedDeviceTypeIds().contains(OpsCenterConstants.HS))
+			{
+				ceOut.getIncludedDeviceTypeIDs().add(OpsCenterConstants.HS);
+			}
+			if (shCnt > 0
+					&& controlEvent.getIncludedDeviceTypeIds().contains(OpsCenterConstants.SH))
+			{
+				ceOut.getIncludedDeviceTypeIDs().add(OpsCenterConstants.SH);
+			}
+			if (dhCnt > 0
+					&& controlEvent.getIncludedDeviceTypeIds().contains(OpsCenterConstants.DH))
+			{
+				ceOut.getIncludedDeviceTypeIDs().add(OpsCenterConstants.DH);
+			}
+			if (irrigationPumpCount > 0
+					&& controlEvent.getIncludedDeviceTypeIds().contains(OpsCenterConstants.IP))
+			{
+				ceOut.getIncludedDeviceTypeIDs().add(OpsCenterConstants.IP);
+			}
+			if (cropHeatCount > 0
+					&& controlEvent.getIncludedDeviceTypeIds().contains(OpsCenterConstants.CH))
+			{
+				ceOut.getIncludedDeviceTypeIDs().add(OpsCenterConstants.CH);
+			}
+			if (generatorCount > 0
+					&& controlEvent.getIncludedDeviceTypeIds().contains(OpsCenterConstants.GEN))
+			{
+				ceOut.getIncludedDeviceTypeIDs().add(OpsCenterConstants.GEN);
+			}
+			if (swhCount > 0
+					&& controlEvent.getIncludedDeviceTypeIds().contains(OpsCenterConstants.SWH))
+			{
+				ceOut.getIncludedDeviceTypeIDs().add(OpsCenterConstants.SWH);
+			}
+			if (sthCount > 0
+					&& controlEvent.getIncludedDeviceTypeIds().contains(OpsCenterConstants.STH))
+			{
+				ceOut.getIncludedDeviceTypeIDs().add(OpsCenterConstants.STH);
+			}
+			if (evcCount > 0
+					&& controlEvent.getIncludedDeviceTypeIds().contains(OpsCenterConstants.EVC))
+			{
+				ceOut.getIncludedDeviceTypeIDs().add(OpsCenterConstants.EVC);
+			}
+			if (evcsCount > 0
+					&& controlEvent.getIncludedDeviceTypeIds().contains(OpsCenterConstants.EVCS))
+			{
+				ceOut.getIncludedDeviceTypeIDs().add(OpsCenterConstants.EVCS);
+			}
+
+			// 2013-Jan-18 KRMT-4217, Add ID Mapping
+			ceOut.calculateIncludedDeviceTypeMap();
+
+			Logger.info("ceOut : " + ceOut);
+
+			return ceOut;
+		}
+
+		// No Control Event for Account
+		return null;
+	}
+
+	@SuppressWarnings("rawtypes")
+	public Map<String, List> findDevicesByType()
+			throws AbstractWebException
+	{
+		// Optimization:
+		// Look up from the cache
+		List<EsiDcModel> dcModelList = CacheUtility.requireDcListFromGlobalCache();
+		List<EsiTstatModel> tstatModelList = CacheUtility.requireTstatListFromGlobalCache();
+
+		HashMap<String, List> devices = new HashMap<String, List>();
+		devices.put("dc", dcModelList);
+		devices.put("tstat", tstatModelList);
+		return devices;
+	}
+
+	@SuppressWarnings({ "rawtypes", "unchecked" })
+	public JsonOutboundDeviceReadings findLatestReadings(Integer accountId)
+			throws AbstractWebException
+	{
+		AccountModel account = CacheUtility.requireCurrentAccountFromGlobalCache();
+		// If account Id is supplied, look up
+		if (accountId != null)
+		{
+			account = CacheUtility.requireAccountFromGlobalCache(accountId);
+		}
+
+		if (account != null && OpsCenterConstants.TRUE.equals(account.getAmiOnlyFlag()))
+		{
+			return new JsonOutboundDeviceReadings();
+		}
+
+		if (account == null)
+		{
+			Logger.error("No account found in global cache for this user");
+			return null;
+		}
+
+		int timeToLiveDefault = Integer.parseInt(Messages
+				.get("config.utility.dashboard.poll.default"));
+		int timeToLivePending = Integer.parseInt(Messages
+				.get("config.utility.dashboard.poll.pending"));
+		int timeToLive = timeToLiveDefault;
+
+		DateTime lastPeriodicReadDateTime = new DateTime()
+				.minusMinutes(OpsCenterConstants.PERIODIC_READ_MINUTES + 1);
+
+		try
+		{
+
+			// get the real device list.
+			UserProgramBeanRemote userProgramEjb = SessionBeanFactory.getUserProgramBean();
+
+			List<EsiDcModel> dcModelList = userProgramEjb.getDcDeviceListForAccount(account
+					.getAccountId(), CacheUtility.getSessionTenantId());
+			List<EsiTstatModel> tstatModelList = userProgramEjb
+					.getTstatDeviceListForAccount(account.getAccountId(), CacheUtility.getSessionTenantId());
+
+			// Look up the current program so we can calculate the
+			// transitionPoint that is in effect.
+			UserProgramModel currentProgram = userProgramEjb.getProgram(CacheUtility
+					.requireLoginCombinedFromGlobalCache().getActiveProgramId(), CacheUtility.getSessionTenantId());
+
+			// Fake up some data for the real devices.
+			List dcList = new ArrayList(dcModelList.size());
+			List tstatList = new ArrayList(tstatModelList.size());
+
+			for (EsiDcModel dc : dcModelList)
+			{
+				if (skippedLcsDeviceList.contains(dc.getDeviceTypeId())) {
+					continue;
+				}
+				HashMap<String, Object> row = new HashMap<String, Object>();
+				// Assemble the device AND the reading
+
+				try
+				{
+					DcCurrentReadingModel cur = userProgramEjb.getDcCurrentReading(dc.getEsiDcId(), CacheUtility.getSessionTenantId());
+
+					// KRMT-1686 check for old data
+					if (cur.getOpsDateCreated().isBefore(lastPeriodicReadDateTime))
+					{
+						row.put(JsonComfort.JSON_KEY_READING_NOT_AVAILABLE,
+								JsonComfort.JSON_KEY_READING_NOT_AVAILABLE_OLD_DATA);
+						row.put(JsonComfort.JSON_KEY_READING, cur);
+					}
+					else
+					{
+						Logger.info("current reading for DC " + cur.getEsiDcId() + " : " + cur);
+
+						row.put(JsonComfort.JSON_KEY_READING, cur);
+					}
+				}
+				catch (DataNotAvailableException x)
+				{
+					// KRMT-1686 : Get the error code
+					String errorCode = x.getErrorCode();
+					String jsonErrorMsg = JsonComfort.JSON_KEY_READING_NOT_AVAILABLE_UNKNOWN;
+
+					if (errorCode.equals(DefaultResources.ACC_ERR_CODE_NO_DATA_PROGRAM_PUSH))
+					{
+						jsonErrorMsg = JsonComfort.JSON_KEY_READING_NOT_AVAILABLE_PROGRAM_PUSH;
+					}
+					if (errorCode.equals(DefaultResources.ACC_ERR_CODE_NO_DATA_SEND_LATEST))
+					{
+						jsonErrorMsg = JsonComfort.JSON_KEY_READING_NOT_AVAILABLE_SEND_LATEST;
+					}
+					if (errorCode.equals(DefaultResources.ACC_ERR_CODE_NO_DATA_NO_DATA))
+					{
+						jsonErrorMsg = JsonComfort.JSON_KEY_READING_NOT_AVAILABLE_NO_DATA;
+					}
+					if (errorCode.equals(DefaultResources.ACC_ERR_CODE_NO_DATA_INVALID_DATA))
+					{
+						jsonErrorMsg = JsonComfort.JSON_KEY_READING_NOT_AVAILABLE_INVALID_DATA;
+					}
+					row.put(JsonComfort.JSON_KEY_READING_NOT_AVAILABLE, jsonErrorMsg);
+					timeToLive = timeToLivePending;
+				}
+				catch (EsiGatewayNotNormalMode x)
+				{ // 2011-Feb-16, We can not display data if the gateway is not
+					// in normal mode.
+					row.put(JsonComfort.JSON_KEY_READING_NOT_AVAILABLE,
+							JsonComfort.JSON_KEY_READING_NOT_AVAILABLE_UNKNOWN);
+				}
+
+				row.put(JsonComfort.JSON_KEY_MODEL, dc);
+
+				try
+				{
+					// Add the current transitionpoint information as well
+					row.put(JsonComfort.JSON_KEY_CURRENT_TP, ProgramUtility
+							.calculateCurrentTransitionPointForDc(currentProgram, dc,
+									new LocalTime()));
+				}
+				catch (TransitionPointNotFoundException x)
+				{
+					row.put(JsonComfort.JSON_KEY_CURRENT_TP_NOT_FOUND,
+							"not_found: " + x.getMessage());
+				}
+
+				dcList.add(row);
+			}
+
+			for (EsiTstatModel tstat : tstatModelList)
+			{
+				if(tstat.getDeviceTypeId()==OpsCenterConstants.DEVICE_TYPE_ID_THIRD_PARTY_TSTAT)
+				{
+					continue;
+				}
+				// Assemble the tstat AND the reading
+				HashMap<String, Object> row = new HashMap<String, Object>();
+
+				try
+				{
+					TstatCurrentReadingModel cur = userProgramEjb.getTstatCurrentReading(
+							account.getAccountId(),
+							tstat.getEsiTstatId(), CacheUtility.getSessionTenantId());
+
+					// KRMT-1273 : Set the not available flag if the temperature
+					// is out of range.
+					ProgramUtility.validateSetPointInRange(cur.getSetPoint(), cur.getOpModeId());
+
+					// KRMT-1686 check for old data
+					if (cur.getOpsDateCreated().isBefore(lastPeriodicReadDateTime))
+					{
+						row.put(JsonComfort.JSON_KEY_READING_NOT_AVAILABLE,
+								JsonComfort.JSON_KEY_READING_NOT_AVAILABLE_OLD_DATA);
+						row.put(JsonComfort.JSON_KEY_READING, cur);
+					}
+					else
+					{
+						Logger.info("current reading for TSTAT " + cur.getEsiTstatId() + " : "
+								+ cur);
+
+						row.put(JsonComfort.JSON_KEY_READING, cur);
+					}
+
+				}
+				catch (ProgramValidationException x)
+				{
+					Logger.error(
+							x,
+							"Invalid Tstat Reading received for esiTstatId: "
+									+ tstat.getEsiTstatId() + ". "
+									+ x);
+					row.put(JsonComfort.JSON_KEY_READING_NOT_AVAILABLE,
+							JsonComfort.JSON_KEY_READING_NOT_AVAILABLE_OUT_OF_RANGE);
+				}
+				catch (DataNotAvailableException x)
+				{
+					// KRMT-1686 : Get the error code
+					String errorCode = x.getErrorCode();
+					String jsonErrorMsg = JsonComfort.JSON_KEY_READING_NOT_AVAILABLE_UNKNOWN; // default
+																								// unknown
+																								// error
+																								// msg
+
+					if (errorCode.equals(DefaultResources.ACC_ERR_CODE_NO_DATA_PROGRAM_PUSH))
+					{
+						jsonErrorMsg = JsonComfort.JSON_KEY_READING_NOT_AVAILABLE_PROGRAM_PUSH;
+					}
+					if (errorCode.equals(DefaultResources.ACC_ERR_CODE_NO_DATA_SEND_LATEST))
+					{
+						jsonErrorMsg = JsonComfort.JSON_KEY_READING_NOT_AVAILABLE_SEND_LATEST;
+					}
+					if (errorCode.equals(DefaultResources.ACC_ERR_CODE_NO_DATA_NO_DATA))
+					{
+						jsonErrorMsg = JsonComfort.JSON_KEY_READING_NOT_AVAILABLE_NO_DATA;
+					}
+					if (errorCode.equals(DefaultResources.ACC_ERR_CODE_NO_DATA_FAILED_RESPONSE))
+					{
+						jsonErrorMsg = JsonComfort.JSON_KEY_READING_NOT_AVAILABLE_PUSH_FAIL;
+					}
+					if (errorCode.equals(DefaultResources.ACC_ERR_CODE_NO_DATA_INVALID_DATA))
+					{
+						jsonErrorMsg = JsonComfort.JSON_KEY_READING_NOT_AVAILABLE_INVALID_DATA;
+					}
+					row.put(JsonComfort.JSON_KEY_READING_NOT_AVAILABLE, jsonErrorMsg);
+					timeToLive = timeToLivePending;
+				}
+				catch (EsiGatewayNotNormalMode x)
+				{ // 2011-Feb-16, We can not display data if the gateway is not
+					// in normal mode.
+					row.put(JsonComfort.JSON_KEY_READING_NOT_AVAILABLE,
+							JsonComfort.JSON_KEY_READING_NOT_AVAILABLE_GATEWAY_BAD_MODE);
+				}
+				row.put(JsonComfort.JSON_KEY_MODEL, tstat);
+
+				try
+				{
+					row.put(JsonComfort.JSON_KEY_CURRENT_TP, ProgramUtility
+							.calculateCurrentTransitionPointForTstat(currentProgram, tstat,
+									new LocalTime()));
+				}
+				catch (TransitionPointNotFoundException x)
+				{
+					row.put(JsonComfort.JSON_KEY_CURRENT_TP_NOT_FOUND,
+							"not_found: " + x.getMessage());
+				}
+
+				tstatList.add(row);
+			}
+
+			HashMap<String, List> out = new HashMap<String, List>();
+			out.put(JsonComfort.JSON_TYPE_DC, dcList);
+			out.put(JsonComfort.JSON_TYPE_TSTAT, tstatList);
+			Logger.info("Dc List " + dcList);
+			Logger.info("Tstat List" + tstatList);
+
+			JsonOutboundDeviceReadings readingsResp = new JsonOutboundDeviceReadings();
+			readingsResp.setListByDeviceType(out);
+			readingsResp.setTimeToLive(timeToLive);
+			return readingsResp;
+
+		}
+		catch (Exception x)
+		{
+
+			Logger.error(x, "JsonResponse, Generic Exception");
+			throw new UnexpectedException(x);
+		}
+	}
+
+	public JsonOutboundDeviceReadings findLatestReadingsForCurrentAccount()
+			throws AbstractWebException
+	{
+		return findLatestReadings(null);
+	}
+
+	// Refactored out of JsonProgram controller.
+
+	public ArrayList<UserProgramModel> findProgramDetailsForCurrentAccount(String name, Integer id,
+			boolean namesOnly)
+			throws AbstractWebException, AbstractOpsCenterException
+	{
+		AccountModel a = CacheUtility.requireCurrentAccountFromGlobalCache();
+
+		if (OpsCenterConstants.TRUE.equals(a.getAmiOnlyFlag()))
+		{
+			return new ArrayList<UserProgramModel>(0);
+		}
+
+		UserProgramBeanRemote userProgEjb = SessionBeanFactory.getUserProgramBean();
+		UserLoginBeanRemote userLoginEjb = SessionBeanFactory.getUserLoginBean();
+
+		if (id != null && id.intValue() > 0)
+		{
+
+			// Security Check here to ensure that programId belongs to userId.
+			boolean foundInUserList = false;
+			UserProgramNameModel upnm = userProgEjb.getAllPrograms(a.getAccountId(), CacheUtility.getSessionTenantId());
+			for (UserProgramName n : upnm.getUserProgramNameCollection())
+			{
+				if (n.getProgramId() == id)
+				{
+					foundInUserList = true;
+				}
+			}
+
+			if (foundInUserList)
+			{
+				// Lookup by ID
+				ArrayList<UserProgramModel> list = new ArrayList<UserProgramModel>(1);
+				UserProgramModel p = userProgEjb.getProgram(id, CacheUtility.getSessionTenantId());
+				list.add(p);
+
+				return list;
+
+			}
+
+			SecurityUserFunctionRequiredException x = new SecurityUserFunctionRequiredException(
+					"JsonProgram: REST user attempted to access a programId that was not in the User Program list: program_id = "
+							+ id);
+			Logger.error(x,
+					": REST user attempted to access a programId that was not in the User Program list");
+			throw x;
+
+		}
+		else if (name != null && name.length() > 0)
+		{
+			// Lookup by Name
+			throw new UnexpectedException(
+					"ConsertConsumerRestApiHelper.findPrograms: LookupByName Unimplemented");
+
+		}
+		else
+		{
+			// List All
+			// Return full details of all programs to be returned in this
+			// method.
+			// Return programs in sorted order by default first, then Ascending
+			// by program ID.
+
+			if (namesOnly)
+			{
+
+				// Return the names of all the programs for the user
+				UserProgramNameModel upnm = userProgEjb.getAllPrograms(a.getAccountId(), CacheUtility.getSessionTenantId());
+
+				UserProgramModel defaultP = userProgEjb.getDefaultProgramForAccount(a
+						.getAccountId(), CacheUtility.getSessionTenantId());
+
+				ArrayList<UserProgramModel> modelList = new ArrayList<UserProgramModel>(upnm
+						.getUserProgramNameCollection().size());
+				for (UserProgramName n : upnm.getUserProgramNameCollection())
+				{
+					UserProgramModel newP = new UserProgramModel();
+					newP.setProgramId(n.getProgramId());
+					newP.setName(n.getProgramName());
+					newP.setAccountId(a.getAccountId());
+
+					// Still have to mark the default flag
+					newP.setDefaultFlag(defaultP.getProgramId() == n.getProgramId() ? "1" : "0");
+					newP.setSchedByRangeFlag(n.isSchedByRangeFlag() ? "1" : "0");
+
+					modelList.add(newP);
+				}
+
+				// 2013-Jan-18, New Feature, iPhone Only, provide a 'End
+				// Vacation' virutal / negative program.
+				// BOOK
+				boolean supportVirtualEndProgram = true;
+				if (supportVirtualEndProgram)
+				{
+					UserLoginCombinedObject ulco = CacheUtility
+							.requireLoginCombinedFromGlobalCache(); // TODO,
+																	// could
+																	// this be
+																	// stale?
+					if (ulco == null)
+					{
+						Logger.warn("[ConsertConsumerRestApiHelper] Pulling userLoginBean again since it was null in the cache");
+						ulco = userLoginEjb.getLoginSessionObject(CacheUtility
+								.getSessionConsertUsername(),CacheUtility.getSessionTenantId());
+					}
+					UserProgramModel virtualEndProgram = null;
+					for (UserProgramModel program : modelList)
+					{
+						Logger.debug("[ConsertConsumerRestApiHelper] program = " + program
+								+ " schedByRange: "
+								+ program.getSchedByRangeFlag() + "  default: "
+								+ program.getDefaultFlag());
+
+						if (program.getProgramId() == ulco.getActiveProgramId()
+								&& program.getSchedByRangeFlag() != null
+								&& program.getSchedByRangeFlag().equals("1")
+								&& program.getDefaultFlag() != null
+								&& program.getDefaultFlag().equals("0"))
+						{
+							virtualEndProgram = new UserProgramModel();
+							virtualEndProgram.setName("End " + program.getName());
+							virtualEndProgram.setProgramId(program.getProgramId() * -1);
+							virtualEndProgram.setSchedByRangeFlag(program.getSchedByRangeFlag());
+							virtualEndProgram.setDefaultFlag(program.getDefaultFlag());
+						}
+					}
+					if (virtualEndProgram != null)
+					{
+						modelList.add(virtualEndProgram);
+					}
+				}
+
+				return modelList;
+
+			}
+			ArrayList<UserProgramModel> programs =
+					ProgramUtility.queryActiveProgramsForAccountIdSorted(userProgEjb,
+							a.getAccountId());
+
+			// No need to send any deleted TP's across the wire.
+			for (UserProgramModel p : programs)
+			{
+				ProgramUtility.trimDeletedAndTemporaryTransitionPoints(p);
+			}
+
+			return programs;
+		}
+	}
+
+	public ArrayList<UserProgramModel> findProgramListForCurrentAccount()
+			throws AbstractWebException, AbstractOpsCenterException
+	{
+		return findProgramDetailsForCurrentAccount(null, null, true);
+	}
+
+	/**
+	 * KRMT-5614: Added Time and Timezone convenience objects for iPhone app 2013-Jan-18 Brockman
+	 *
+	 * @throws AbstractWebException
+	 */
+	public JsonOutboundAccountTime findTimeForAccount(AccountModel account)
+			throws AbstractWebException
+	{
+		DateTimeZone accountZone = account.getTimezone();
+		if (accountZone == null)
+		{
+			throw new UnexpectedException("Error: The Account TimeZone was null");
+		}
+
+		JsonOutboundAccountTime now = new JsonOutboundAccountTime(accountZone);
+
+		return now;
+	}
+
+	public HashMap<String, String> generateJsonSsoAssertionMap(UserModel user, AccountModel account)
+			throws SsoCryptoException, ApplicationConfException, SsoValidationException, UnsupportedEncodingException
+	{
+		HashMap<String, String> destIntent = new HashMap<String, String>();
+		destIntent.put(JsonAssertionSimple2011Apr.INTENT_URI, "/json/secure");
+		destIntent.put(JsonAssertionSimple2011Apr.INTENT_USERNAME, user.getUsername());
+		// krmt-6212-- need to use account Id when CAK is enabled
+		destIntent.put(JsonAssertionSimple2011Apr.INTENT_ACCOUNT,
+				Integer.toString(account.getAccountId()));
+
+		// TODO add logic to rotate the token or not?
+
+		JsonAssertionSimple2011Apr assertion =
+				JsonSsoUtility.generateAssertionFromApplicationConf(user.getUsername(),
+						new ArrayList<String>(), destIntent);
+		String newAuthAssertion = assertion.toCryptedBase64();
+		HashMap<String, String> auth = new HashMap<String, String>();
+		auth.put("authAssertion", newAuthAssertion);
+		// For convenience, I encode for the other developers.
+		auth.put("authAssertionUrlEncoded", URLEncoder.encode(newAuthAssertion, "UTF-8"));
+
+		return auth;
+	}
+	
+	/**
+	 * 
+	 * @param dmConfigModel
+	 * @return
+	 */
+	public JsonDMModel mapper(DMConfigModel dmConfigModel)
+	{
+		DmMeterSettingModel dmMeterSettingModel = dmConfigModel.getDmMeterSettingModel();
+		JsonDMModel model = new JsonDMModel(Integer.valueOf(dmConfigModel.getAccountId()), Double.valueOf(dmMeterSettingModel.getDemandTarget()),
+				dmConfigModel.getInstantKw(), dmConfigModel.getInstantKwDate(), dmConfigModel.getWorkflowFlag(),
+				dmConfigModel.getDcwSentTimestamp().getMillis());
+
+		List<DmDeviceModel> dmDeviceModels = dmConfigModel.getDmDeviceModels();
+		Comparator<DmDeviceModel> comparator = (d1, d2) -> d1.getPriority().compareTo(d2.getPriority());
+		List<JsonDmDeviceModel> jsonDmDeviceModels = dmDeviceModels.stream().sorted(comparator).map(dmDevModel -> createJsonDmDeviceModel(dmDevModel))
+				.collect(Collectors.toList());
+		model.setDmDeviceModels(jsonDmDeviceModels);
+		return model;
+	}
+
+	private JsonDmDeviceModel createJsonDmDeviceModel(DmDeviceModel dmDevModel)
+	{
+		return new JsonDmDeviceModel(dmDevModel.getEsiDcId(), dmDevModel.getDeviceName(), dmDevModel.getStrStatus());
+	}
+
+	public JsonObject dmAlertMapper(DMConfigModel dmConfigModel)
+	{
+		JsonObject gsonObject = new JsonObject();
+		gsonObject.addProperty("account_id", dmConfigModel.getAccountId());
+		gsonObject.addProperty("dtExceededAlertEnabledFlag", dmConfigModel.getDtExceededAlertEnabledFlag());
+		JsonArray jsonArray = new JsonArray();
+		for (DmDeviceModel model : dmConfigModel.getDmDeviceModels())
+		{
+			JsonObject gsonDevObj = new JsonObject();
+			gsonDevObj.addProperty("esiDcId", model.getEsiDcId());
+			gsonDevObj.addProperty("alertEnabledFlag", model.getAlertEnabledFlag());
+			jsonArray.add(gsonDevObj);
+		}
+		gsonObject.addProperty("esiDcIdAndAlertFlagMap", jsonArray.toString());
+		return gsonObject;
+	}
+}

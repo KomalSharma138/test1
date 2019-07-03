@@ -1,0 +1,1303 @@
+package com.consert.web.program;
+
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.Comparator;
+import java.util.HashMap;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+
+import javassist.bytecode.Opcode;
+
+import org.joda.time.DateTime;
+import org.joda.time.Interval;
+import org.joda.time.LocalTime;
+
+import com.consert.web.util.ConsertLogger;
+import play.exceptions.UnexpectedException;
+import play.i18n.Messages;
+
+import com.consert.core.ejb.constant.OpsCenterConstants;
+import com.consert.core.ejb.exception.AbstractOpsCenterException;
+import com.consert.core.ejb.exception.TransitionPointNotFoundException;
+import com.consert.core.ejb.session.interfaces.UserProgramBeanRemote;
+import com.consert.core.model.AccountModel;
+import com.consert.core.model.DCTransitionPointModel;
+import com.consert.core.model.EsiDcModel;
+import com.consert.core.model.EsiTstatModel;
+import com.consert.core.model.ProgramScheduleRangeModel;
+import com.consert.core.model.TstatTransitionPointModel;
+import com.consert.core.model.UserProgramModel;
+import com.consert.core.model.UserProgramName;
+import com.consert.core.model.UserProgramNameModel;
+import com.consert.web.exception.ProgramValidationException;
+import com.consert.web.util.CacheUtility;
+import com.consert.web.util.JsonResponse;
+import com.consert.web.util.SessionBeanFactory;
+
+/**
+ * Constants and useful datetime routines for interacting with UserProgramModels Location of many of
+ * the core Program Validation routines for ranges, dates, temperatures, etc.
+ *
+ * @author brockman
+ *
+ */
+
+public class ProgramUtility
+{
+	// The order of these four arrays if very important. It maps the JSON day of
+	// week keys to the opscenter integer values.
+	public static String[] OPS_TEXT_DAYS = { "0", "1", "2", "3", "4", "5", "6" };
+	public static String[] JSON_TEXT_DAYS = { "sat", "sun", "mon", "tue", "wed", "thu", "fri" };
+	public static String[] OPS_TEXT_MONTHS = { "0", "1", "2", "3", "4", "5", "6", "7", "8", "9",
+			"10", "11" };
+	public static String[] JSON_TEXT_MONTHS = { "jan", "feb", "mar", "apr", "may", "jun", "jul",
+			"aug", "sep", "oct", "nov", "dec" };
+
+	public static final int OP_MODE_HEAT_ONLY_ID = 1;
+	public static final int OP_MODE_COOL_ONLY_ID = 2;
+	public static final int OP_MODE_OFF_ID = 3;
+	public static final int OP_MODE_DEFAULT_ID = 4;
+	public static final int OP_MODE_HEAT_COOL_ID = 5;
+	public static final int OP_MODE_UNAVAILABLE_ID = 22;
+	public static final int OP_MODE_UNAVAILABLE_ID_2 = 255;
+
+	public static final String OP_MODE_HEAT_ONLY_NAME = "Heat";
+	public static final String OP_MODE_COOL_ONLY_NAME = "Cool";
+	public static final String OP_MODE_OFF_NAME = "Off";
+	public static final String OP_MODE_HEAT_COOL_NAME = "Auto";
+	public static final String OP_MODE_DEFAULT_NAME = "Default";
+	public static final String OP_MODE_UNAVAILABLE_NAME = "Unavailable";
+
+	public static final String OPSCENTER_TRUE = "1";
+	public static final String OPSCENTER_FALSE = "0";
+
+	public static final boolean PUBLISH_SINGLE_CHECK_FOR_MAINTENANCE = true;
+
+	// KRMT-2081: standardize and internationalize all error messages
+	public static final String I18N_TSTAT_NO_TPS = "lang.js.programs.error.tstat.noTPs";
+	public static final String I18N_DC_NO_TPS = "lang.js.programs.error.dc.noTPs";
+	public static final String I18N_TSTAT_SAME_TIME = "lang.js.programs.error.tstat.sameTimeTPs";
+	public static final String I18N_DC_SAME_TIME = "lang.js.programs.error.dc.sameTimeTPs";
+	public static final String I18N_CONFLICT_SCHEDULES = "lang.js.programs.error.conflictScheduleRanges";
+	public static final String I18N_NO_SCHEDULE_BY_RANGE = "lang.js.programs.error.noScheduleRange";
+	public static final String I18N_TP_OVERMAX = "lang.js.programs.error.tp.overMax";
+	public static final String I18N_TP_UNDERMIN = "lang.js.programs.error.tp.underMin";
+	public static final String I18N_TP_COOL_OVERLIMIT = "lang.js.programs.error.tp.coolOverLimit";
+	public static final String I18N_TP_HEAT_OVERLIMIT = "lang.js.programs.error.tp.heatOverLimit";
+	public static final String I18N_TP_PREF_OVERLIMIT = "lang.js.programs.error.tp.prefOverLimit";
+
+	// Sorting for Default first, then by ID.
+	static final Comparator<UserProgramModel> SORT_DEFAULT_THEN_PROGRAM_ID_ASC = new UserProgramModelComparator();
+
+	private static ProgramValidationParams validationParams = null;
+
+	/**
+	 * Inspect the program and return the DCTransitionPoint that will be active at the specified
+	 * time, specified device.
+	 *
+	 * @param currentProgram
+	 * @param dc
+	 */
+	public static DCTransitionPointModel calculateCurrentTransitionPointForDc(UserProgramModel program, EsiDcModel dc,
+			LocalTime atTime) throws TransitionPointNotFoundException
+	{
+		if (program.getDcTransitionPointCollection() == null
+				|| program.getDcTransitionPointCollection().size() == 0)
+		{
+			throw new TransitionPointNotFoundException(
+					"DC TransitionPoint List was Null or Empty. No Tp's to search");
+		}
+
+		GenericTransitionPointWrapper match = calculateCurrentTransitionPointForGeneric(
+				GenericTransitionPointWrapper
+						.createDcList(program.getDcTransitionPointCollection()),
+				atTime);
+		return match.getDcTp();
+	}
+
+	/**
+	 * Generalized Sort Routine for determine the active Transition Point that should be running at
+	 * a specific time.
+	 *
+	 * @param incomingTps
+	 * @param atTime
+	 * @return
+	 * @throws TransitionPointNotFoundException
+	 */
+	private static GenericTransitionPointWrapper calculateCurrentTransitionPointForGeneric(
+			ArrayList<GenericTransitionPointWrapper> incomingTps, LocalTime atTime) throws TransitionPointNotFoundException
+	{
+
+
+		// Clone the array
+		ArrayList<GenericTransitionPointWrapper> tpSorted = new ArrayList<GenericTransitionPointWrapper>(
+				incomingTps.size());
+
+		// Add only the valid records.
+		for (GenericTransitionPointWrapper w : incomingTps)
+		{
+			if (w.isValid())
+			{
+				tpSorted.add(w);
+			}
+		}
+
+		// List must be at least 1 item
+		if (tpSorted.size() == 0)
+		{
+			throw new TransitionPointNotFoundException(
+					"TransitionPoint List was Null or Empty after inactive and deleted removed. No Tp's to search");
+		}
+
+		// Sort the array by time
+		Collections.sort(tpSorted, new GenericTpTimeComparator());
+
+		/**
+		 * Algorithm for finding a TP:
+		 *
+		 * 1. Sort the transition point times. 2. Iterate the transitionPoint Times, 2.1. Store a
+		 * match if the requestedTime is after the transitionPointStarting time. 3. If nothing
+		 * stored, store the last TP of the day (Wraparound)
+		 */
+		GenericTransitionPointWrapper tpMatch = null;
+		GenericTransitionPointWrapper tpPrevious = null;
+
+		// Iterate in order.
+		for (GenericTransitionPointWrapper tp : tpSorted)
+		{
+
+			if (atTime.isAfter(tp.getTpTime()))
+			{
+				tpMatch = tp;
+			}
+			tpPrevious = tp;
+		}
+
+		if (tpMatch == null)
+		{
+			// Assign the last one of the day if nothing found in the iteration.
+			tpMatch = tpPrevious;
+		}
+
+		if (tpMatch == null)
+		{
+			// scanned through , but foudn nothing
+			throw new TransitionPointNotFoundException("Scanned through entire list of "
+					+ incomingTps.size() + ", found no match");
+		}
+
+		return tpMatch;
+	}
+
+	/**
+	 * Inspect the program and return the DCTransitionPoint that will be active at the specified
+	 * time, specified device.
+	 *
+	 * @param tstat
+	 * @param currentProgram
+	 * @param dc
+	 */
+	public static TstatTransitionPointModel calculateCurrentTransitionPointForTstat(UserProgramModel program, EsiTstatModel tstat,
+			LocalTime atTime) throws TransitionPointNotFoundException
+	{
+		if (program.getTstatTransitionPointCollection() == null
+				|| program.getTstatTransitionPointCollection().size() == 0)
+		{
+			throw new TransitionPointNotFoundException(
+					"Tstat TransitionPoint List was Null or Empty. No Tp's to search");
+		}
+
+		GenericTransitionPointWrapper match = calculateCurrentTransitionPointForGeneric(
+				GenericTransitionPointWrapper.createTstatList(program
+						.getTstatTransitionPointCollection()), atTime);
+		return match.getTstatTp();
+	}
+
+	/**
+	 * Copy all the transition points from one program to another program.
+	 *
+	 * @param fromProgram
+	 * @param toProgram
+	 */
+	public static void copyAllTransitionPoints(UserProgramModel fromProgram, UserProgramModel toProgram)
+	{
+		// KRMT-1544 Add a safety check to set the transition point lists to
+		// non-null if opscenter gives us back null ones.
+
+		if (fromProgram.getDcTransitionPointCollection() != null
+				&& toProgram.getDcTransitionPointCollection() != null)
+		{
+			ConsertLogger.info("copyAllTransitionPoints. DC: from: "
+					+ fromProgram.getDcTransitionPointCollection().size() + "  to: "
+					+ toProgram.getDcTransitionPointCollection().size());
+			toProgram.getDcTransitionPointCollection().addAll(
+					fromProgram.getDcTransitionPointCollection());
+		}
+		else if (toProgram.getDcTransitionPointCollection() == null)
+		{
+			toProgram.setDcTransitionPointCollection(new ArrayList<DCTransitionPointModel>());
+		}
+
+		if (fromProgram.getTstatTransitionPointCollection() != null
+				&& toProgram.getTstatTransitionPointCollection() != null)
+		{
+			ConsertLogger.info("copyAllTransitionPoints. Tstat: from: "
+					+ fromProgram.getTstatTransitionPointCollection().size() + "  to: "
+					+ toProgram.getTstatTransitionPointCollection().size());
+			toProgram.getTstatTransitionPointCollection().addAll(
+					fromProgram.getTstatTransitionPointCollection());
+		}
+		else if (toProgram.getDcTransitionPointCollection() == null)
+		{
+			toProgram.setTstatTransitionPointCollection(new ArrayList<TstatTransitionPointModel>());
+		}
+	}
+
+	/**
+	 * Utility routine to create and populate a zeroed day Of week map with all keys.
+	 */
+	public static LinkedHashMap<String, String> createZeroDayOfWeekMap()
+	{
+		return createZeroSizeMap(7);
+	}
+
+	/**
+	 * Utility routine to create and populate a zeroed Month Of Year map with all keys.
+	 */
+	public static LinkedHashMap<String, String> createZeroMonthOfYearMap()
+	{
+		return createZeroSizeMap(12);
+	}
+
+	public static LinkedHashMap<String, String> createZeroSizeMap(int size)
+	{
+		LinkedHashMap<String, String> map = new LinkedHashMap<String, String>();
+		for (int i = 0; i < size; i++)
+		{
+			map.put(i + "", "0");
+		}
+		return map;
+	}
+
+	/**
+	 * Find the best matching opModeId based on the unscrubbed user input. Used heavily by the JSON
+	 * service layer.
+	 *
+	 * @param opModeId
+	 * @param opModeName
+	 * @return
+	 */
+	public static int determineOpMode(int opModeId, String opModeName)
+	{
+
+		if (opModeId == OP_MODE_HEAT_ONLY_ID
+				|| opModeName.toLowerCase().startsWith(OP_MODE_HEAT_ONLY_NAME.toLowerCase()))
+		{
+			return OP_MODE_HEAT_ONLY_ID;
+		}
+		else if (opModeId == OP_MODE_COOL_ONLY_ID
+				|| opModeName.toLowerCase().startsWith(OP_MODE_COOL_ONLY_NAME.toLowerCase()))
+		{
+			return OP_MODE_COOL_ONLY_ID;
+		}
+
+		else if (opModeId == OP_MODE_OFF_ID
+				|| opModeName.toLowerCase().startsWith(OP_MODE_OFF_NAME.toLowerCase()))
+		{
+			return OP_MODE_OFF_ID;
+		}
+		else if (opModeId == OP_MODE_HEAT_COOL_ID
+				|| opModeName.toLowerCase().startsWith(OP_MODE_HEAT_COOL_NAME.toLowerCase()))
+		{
+			return OP_MODE_HEAT_COOL_ID;
+		}
+		else if (opModeId == OP_MODE_DEFAULT_ID
+				|| opModeName.toLowerCase().startsWith(OP_MODE_DEFAULT_NAME.toLowerCase()))
+		{
+			return OP_MODE_DEFAULT_ID;
+		}
+		else if (opModeId == OP_MODE_UNAVAILABLE_ID_2
+				|| opModeName.toLowerCase().startsWith(OP_MODE_UNAVAILABLE_NAME.toLowerCase()))
+		{
+			return OP_MODE_UNAVAILABLE_ID_2;
+		}
+		else
+		{
+			return OP_MODE_UNAVAILABLE_ID_2;
+		}
+	}
+
+	public static int determineOpModeByName(String opModeName)
+	{
+		return determineOpMode(-1, opModeName);
+	}
+
+	private static String getDcName(int esiDcId, List<EsiDcModel> dcList)
+	{
+		for (EsiDcModel dc : dcList)
+		{
+			if (dc.getEsiDcId() == esiDcId)
+			{
+				return dc.getName();
+			}
+		}
+		return "";
+	}
+
+	private static String getDcNames(List<EsiDcModel> dcList)
+	{
+		StringBuffer sb = new StringBuffer();
+		for (EsiDcModel dc : dcList)
+		{
+			sb.append(dc.getName()).append(", ");
+		}
+
+		// remove last comma from end of string
+		sb.deleteCharAt(sb.lastIndexOf(","));
+
+		return sb.toString();
+	}
+
+	public static String getOpModeName(int opModeId)
+	{
+		switch (opModeId)
+		{
+			case OP_MODE_HEAT_ONLY_ID:
+				return OP_MODE_HEAT_ONLY_NAME;
+			case OP_MODE_COOL_ONLY_ID:
+				return OP_MODE_COOL_ONLY_NAME;
+			case OP_MODE_OFF_ID:
+				return OP_MODE_OFF_NAME;
+			case OP_MODE_HEAT_COOL_ID:
+				return OP_MODE_HEAT_COOL_NAME;
+			default:
+				break;
+		}
+		return OP_MODE_UNAVAILABLE_NAME;
+	}
+
+	/**
+	 * Return a string containing "0" to "6" for the day of the week string.
+	 *
+	 * @param dayString
+	 *        A >= 3 character string for the day of the week, ie: sat, sun, mon
+	 */
+	public static String getOpsCenterDayOfWeekIndexForDayString(String dayString)
+	{
+		for (int i = 0; i < JSON_TEXT_DAYS.length; i++)
+		{
+			if (dayString.substring(0, 3).equalsIgnoreCase(JSON_TEXT_DAYS[i]))
+			{
+				return OPS_TEXT_DAYS[i];
+			}
+		}
+		return "-1";
+	}
+
+	/**
+	 * Return a string containing "0" to "11" for the month of the year string.
+	 *
+	 * @param dayString
+	 *        A >= 3 character string for the day of the week, ie: sat, sun, mon
+	 */
+	public static String getOpsCenterMonthOfYearIndexForDayString(String dayString)
+	{
+		for (int i = 0; i < JSON_TEXT_MONTHS.length; i++)
+		{
+			if (dayString.substring(0, 3).equalsIgnoreCase(JSON_TEXT_MONTHS[i]))
+			{
+				return OPS_TEXT_MONTHS[i];
+			}
+		}
+		return "-1";
+	}
+
+	public static ProgramValidationParams getProgramValidationParams()
+	{
+		initValidationParams();
+		return validationParams;
+	}
+
+	private static String getTstatName(int esiTstatId, List<EsiTstatModel> tstatList)
+	{
+		for (EsiTstatModel tstat : tstatList)
+		{
+			if (tstat.getEsiTstatId() == esiTstatId)
+			{
+				return tstat.getName();
+			}
+		}
+		return "";
+	}
+
+	private static String getTstatNames(List<EsiTstatModel> tstatList)
+	{
+		StringBuffer sb = new StringBuffer();
+		for (EsiTstatModel tstat : tstatList)
+		{
+			sb.append(tstat.getName()).append(", ");
+		}
+
+		// remove last comma from end of string
+		sb.deleteCharAt(sb.lastIndexOf(","));
+
+		return sb.toString();
+	}
+
+	private static void initValidationParams()
+	{
+		if (validationParams == null)
+		{
+			validationParams = new ProgramValidationParams();
+		}
+	}
+
+	/**
+	 * Mark all DC and Tstat Transition Points as deleted in a program
+	 *
+	 * @param program
+	 */
+	public static void markAllTransitionPointsAsDeleted(UserProgramModel program)
+	{
+		if (program.getDcTransitionPointCollection() != null)
+		{
+			for (DCTransitionPointModel tp : program.getDcTransitionPointCollection())
+			{
+				tp.setDeleteFlag(OPSCENTER_TRUE);
+			}
+		}
+
+		if (program.getTstatTransitionPointCollection() != null)
+		{
+			for (TstatTransitionPointModel tp : program.getTstatTransitionPointCollection())
+			{
+				tp.setDeleteFlag(OPSCENTER_TRUE);
+			}
+		}
+
+	}
+
+	/**
+	 * Play UI Utility for creating a new Json Response structure that contains all the errors.
+	 *
+	 * @param errorList
+	 * @param message
+	 * @return
+	 */
+	public static JsonResponse newJsonResponseForValidationErrors(List<ProgramValidationException> errorList, String message)
+	{
+		ConsertLogger.error("ProgramUtility: Transforming Error in Validation to JSON: " + message);
+
+		HashMap<Integer, HashMap<String, String>> errorData = new HashMap<Integer, HashMap<String, String>>();
+		for (ProgramValidationException pve : errorList)
+		{
+			ConsertLogger.error(pve, "Validation Error on ProgramId: " + pve.getProgramId());
+			errorData.put(pve.getProgramId(), pve.toJsonHash());
+		}
+
+		return new JsonResponse(false, errorData, message);
+
+	}
+
+	/**
+	 * Convenience Routine to translate the Program Name List to the full Program Details.
+	 *
+	 * @param userProgramEjb
+	 * @param accountId
+	 * @return
+	 * @throws AbstractOpsCenterException
+	 */
+	public static ArrayList<UserProgramModel> queryActiveProgramsForAccountIdSorted(UserProgramBeanRemote userProgramEjb, int accountId)
+			throws AbstractOpsCenterException
+	{
+		// gotta go from name to details.
+		UserProgramNameModel upnList = userProgramEjb.getAllPrograms(accountId, CacheUtility.getSessionTenantId());
+		ArrayList<UserProgramModel> upmList = new ArrayList<UserProgramModel>(upnList
+				.getUserProgramNameCollection().size());
+
+		for (UserProgramName upn : upnList.getUserProgramNameCollection())
+		{
+			upmList.add(userProgramEjb.getProgram(upn.getProgramId(), CacheUtility.getSessionTenantId()));
+		}
+
+		Collections.sort(upmList, SORT_DEFAULT_THEN_PROGRAM_ID_ASC);
+
+		return upmList;
+	}
+
+	/**
+	 * Mark all scheduling in toProgram as deleted and completely replace it with the scheduling in
+	 * fromProgram
+	 *
+	 * @param p
+	 * @param oldProgram
+	 */
+	public static void replaceAllScheduling(UserProgramModel fromProgram, UserProgramModel toProgram)
+	{
+
+		// Delete all current schedules in memory. Opscenter knows to erase
+		// these in the DB.
+
+		if (toProgram.getProgramScheduleRangeCollection() != null)
+		{
+			toProgram.getProgramScheduleRangeCollection().clear();
+			toProgram.getProgramScheduleRangeCollection().addAll(
+					fromProgram.getProgramScheduleRangeCollection());
+		}
+
+		if (toProgram.getProgramScheduleDayMap() != null)
+		{
+			toProgram.getProgramScheduleDayMap().clear();
+			toProgram.getProgramScheduleDayMap().putAll(fromProgram.getProgramScheduleDayMap());
+		}
+
+		if (toProgram.getProgramScheduleMonthMap() != null)
+		{
+			toProgram.getProgramScheduleMonthMap().clear();
+			toProgram.getProgramScheduleMonthMap().putAll(fromProgram.getProgramScheduleMonthMap());
+		}
+
+	}
+
+	public static UserProgramModel rewriteAllTransitionPointSetPointsBasedOnOpMode(UserProgramModel upm) throws ProgramValidationException
+	{
+		if (upm.getTstatTransitionPointCollection() != null)
+		{
+			for (TstatTransitionPointModel tp : upm.getTstatTransitionPointCollection())
+			{
+				rewriteTransitionPointSetPointsBasedOnOpMode(tp);
+			}
+		}
+		return upm;
+	}
+
+	/**
+	 * Review the opMode of the transition point and adjust the prefHeat/prefCool,min/max values to
+	 * stay within the configured ranges for transition points that are heat only or cool only.
+	 *
+	 * @param tp
+	 * @return
+	 */
+	public static TstatTransitionPointModel rewriteTransitionPointSetPointsBasedOnOpMode(TstatTransitionPointModel tp)
+			throws ProgramValidationException
+	{
+
+		switch (tp.getOpModeId())
+		{
+			case OP_MODE_HEAT_ONLY_ID:
+				// set the prefcool and min to values just above range.
+				tp.setPrefCoolTemp(tp.getPrefHeatTemp()
+						+ getProgramValidationParams()
+								.getTstatDiffBetweenPrefCoolAndPrefHeatLowerLimit());
+				tp.setMaxTemp(tp.getPrefCoolTemp()
+						+ getProgramValidationParams()
+								.getTstatDiffBetweenMaxAndPrefCoolLowerLimit());
+				break;
+
+			case OP_MODE_COOL_ONLY_ID:
+
+				tp.setPrefHeatTemp(tp.getPrefCoolTemp()
+						- getProgramValidationParams()
+								.getTstatDiffBetweenPrefCoolAndPrefHeatLowerLimit());
+				tp.setMinTemp(tp.getPrefHeatTemp()
+						- getProgramValidationParams()
+								.getTstatDiffBetweenPrefHeatAndMinLowerLimit());
+				break;
+
+			case OP_MODE_HEAT_COOL_ID:
+			case OP_MODE_OFF_ID:
+			case OP_MODE_DEFAULT_ID:
+			case OP_MODE_UNAVAILABLE_ID:
+			case OP_MODE_UNAVAILABLE_ID_2:
+
+				// no-op
+				break;
+
+			default:
+				throw new ProgramValidationException(
+						ProgramValidationException.I18N_TSTAT_TRANSITION_POINT_INVALID_OPMODE, 0,
+						"Unknown OpModeId: "
+								+ tp.getOpModeId() + " : " + tp.getOpModeName());
+
+		}
+
+		// Step 2: KRMT-1593, Prevent the max temp and min temp from ever going
+		// beyond the extreme values
+
+		if (tp.getMaxTemp() > getProgramValidationParams().getTstatExtremeMax())
+		{
+			tp.setMaxTemp(getProgramValidationParams().getTstatExtremeMax());
+		}
+
+		if (tp.getMinTemp() < getProgramValidationParams().getTstatExtremeMin())
+		{
+			tp.setMinTemp(getProgramValidationParams().getTstatExtremeMin());
+		}
+
+		return tp;
+	}
+
+	/**
+	 * Utility routine to set the created information into the pass by reference program. Sets
+	 * program.userCreated and program.dateCreated
+	 *
+	 * @param p
+	 */
+	public static void setCreatedStamp(UserProgramModel p)
+	{
+		p.setUserCreated(CacheUtility.getSessionConsertUsername());
+		p.setDateCreated(new DateTime());
+
+		setModifiedStamp(p);
+	}
+
+	/**
+	 * Translate the Day of week text into the numerical days of week specified by opscenter.
+	 * WARNING: This method arose because opscenter starts the week a Sat = 0, which was nonstandard
+	 *
+	 * @param map
+	 * @param dayKey
+	 * @param value
+	 */
+	public static void setDayOfWeekToMap(int programId, LinkedHashMap<String, String> map, String dayKey, Integer value)
+			throws ProgramValidationException
+	{
+		String key = null;
+
+		for (int i = 0; i < JSON_TEXT_DAYS.length; i++)
+		{
+			if (JSON_TEXT_DAYS[i].equals(dayKey.toLowerCase().substring(0,
+					JSON_TEXT_DAYS[i].length())))
+			{
+				key = OPS_TEXT_DAYS[i];
+			}
+		}
+
+		if (key != null)
+		{
+			map.put(key, value > 0 ? OPSCENTER_TRUE : OPSCENTER_FALSE);
+		}
+		else
+		{
+			throw new ProgramValidationException(
+					ProgramValidationException.I18N_SCHEDULE_INVALID_DAY, programId,
+					"Unable to map Day of Week String (" + dayKey
+							+ ") to any acceptable opscenter value");
+		}
+	}
+
+	/**
+	 * Utility routine to set the modified information into the pass by reference program. Sets
+	 * program.userModified and program.dateModified
+	 *
+	 * @param p
+	 */
+	public static void setModifiedStamp(UserProgramModel p)
+	{
+		p.setUserModified(CacheUtility.getSessionConsertUsername());
+		p.setDateModified(new DateTime());
+	}
+
+	public static void setMonthOfYearToMap(int programId, LinkedHashMap<String, String> map, String dayKey, Integer value)
+			throws ProgramValidationException
+	{
+		String key = null;
+
+		for (int i = 0; i < JSON_TEXT_MONTHS.length; i++)
+		{
+			if (JSON_TEXT_MONTHS[i].equals(dayKey.toLowerCase().substring(0,
+					JSON_TEXT_MONTHS[i].length())))
+			{
+				key = OPS_TEXT_MONTHS[i];
+			}
+		}
+
+		if (key != null)
+		{
+			map.put(key, value > 0 ? OPSCENTER_TRUE : OPSCENTER_FALSE);
+		}
+		else
+		{
+			throw new ProgramValidationException(
+					ProgramValidationException.I18N_SCHEDULE_INVALID_MONTH, programId,
+					"Unable to map Month of Year String (" + dayKey
+							+ ") to any acceptable opscenter value");
+		}
+	}
+
+	/**
+	 * Remove the deleted transitionPoints from the in memory model. This is iinvoked in the JSON
+	 * program controller to clean up the data going back to the advanced UI screen.
+	 *
+	 * @param pm
+	 */
+	public static void trimDeletedAndTemporaryTransitionPoints(UserProgramModel pm)
+	{
+		// PM is pass by reference.
+
+		// 2 passes here to avoid a concurrent modification exception
+
+		if (pm.getDcTransitionPointCollection() != null)
+		{
+			ArrayList<DCTransitionPointModel> dcToDelete = new ArrayList<DCTransitionPointModel>(pm
+					.getDcTransitionPointCollection().size());
+
+			// Find any that are deleted or temporary
+			for (DCTransitionPointModel tp : pm.getDcTransitionPointCollection())
+			{
+				// ADD tp.getTempFlag().equalsIgnoreCase(OPSCENTER_TRUE) once
+				// opscenter implements it in KRMT-1509
+				if (tp.getDeleteFlag().equalsIgnoreCase(OPSCENTER_TRUE)
+						|| tp.getTempFlag() != null
+						&& tp.getTempFlag().equalsIgnoreCase(OPSCENTER_TRUE))
+				{
+					dcToDelete.add(tp);
+				}
+			}
+
+			// Remove the lists from the model
+			for (DCTransitionPointModel tp : dcToDelete)
+			{
+				pm.getDcTransitionPointCollection().remove(tp);
+			}
+
+		}
+
+		if (pm.getTstatTransitionPointCollection() != null)
+		{
+
+			ArrayList<TstatTransitionPointModel> tstatToDelete = new ArrayList<TstatTransitionPointModel>(
+					pm
+							.getTstatTransitionPointCollection().size());
+
+			for (TstatTransitionPointModel tp : pm.getTstatTransitionPointCollection())
+			{
+				if (tp.getDeleteFlag().equalsIgnoreCase(OPSCENTER_TRUE)
+						|| tp.getTempFlag() != null
+						&& tp.getTempFlag().equalsIgnoreCase(OPSCENTER_TRUE))
+				{
+					tstatToDelete.add(tp);
+				}
+			}
+
+			for (TstatTransitionPointModel tp : tstatToDelete)
+			{
+				pm.getTstatTransitionPointCollection().remove(tp);
+			}
+		}
+
+	}
+
+	/**
+	 * @param tp
+	 * @throws ProgramValidationException
+	 */
+	public static void validateDcTransitionPoint(DCTransitionPointModel tp) throws ProgramValidationException
+	{
+		initValidationParams();
+	}
+
+	/**
+	 * Play UI Utility for making it very low code to query and uncover all validation problems for
+	 * programs.
+	 *
+	 * @param account
+	 * @return
+	 * @throws UnexpectedException
+	 * @throws AbstractOpsCenterException
+	 */
+
+	public static ArrayList<ProgramValidationException> validateProgramsInDatabaseForAccount(AccountModel account) throws UnexpectedException,
+			AbstractOpsCenterException
+	{
+		ArrayList<ProgramValidationException> out = new ArrayList<ProgramValidationException>();
+
+		ArrayList<UserProgramModel> allModels = queryActiveProgramsForAccountIdSorted(
+				SessionBeanFactory.getUserProgramBean(),
+				account.getAccountId());
+
+		out.addAll(validateUserProgramSchedules(allModels));
+
+		return out;
+
+	}
+
+	/**
+	 * Validate that the setPoint being returned is valid within range for the operation mode.
+	 *
+	 * @param setPoint
+	 * @param opModeId
+	 * @return
+	 */
+	public static void validateSetPointInRange(int setPoint, int opModeId) throws ProgramValidationException
+	{
+
+		switch (opModeId)
+		{
+			case OP_MODE_HEAT_ONLY_ID:
+
+				if (setPoint < getProgramValidationParams().getTstatPrefHeatMin())
+				{
+					throw new ProgramValidationException(
+							ProgramValidationException.I18N_TSTAT_TRANSITION_POINT_HEAT, 0,
+							"setPoint(" + setPoint
+									+ ") is below min prefHeat configured");
+				}
+				if (setPoint > getProgramValidationParams().getTstatPrefHeatMax())
+				{
+					throw new ProgramValidationException(
+							ProgramValidationException.I18N_TSTAT_TRANSITION_POINT_HEAT, 0,
+							"setPoint(" + setPoint
+									+ ") is above max prefHeat configured");
+				}
+				break;
+
+			case OP_MODE_COOL_ONLY_ID:
+			case OP_MODE_HEAT_COOL_ID: // BUGBUG: Auto implementation just
+										// re-uses the cool ranges for 3.0.
+
+				if (setPoint < getProgramValidationParams().getTstatPrefCoolMin())
+				{
+					throw new ProgramValidationException(
+							ProgramValidationException.I18N_TSTAT_TRANSITION_POINT_COOL, 0,
+							"setPoint(" + setPoint
+									+ ") is below min prefCool configured");
+				}
+				if (setPoint > getProgramValidationParams().getTstatPrefCoolMax())
+				{
+					throw new ProgramValidationException(
+							ProgramValidationException.I18N_TSTAT_TRANSITION_POINT_COOL, 0,
+							"setPoint(" + setPoint
+									+ ") is above max prefCool configured");
+				}
+				break;
+
+			case OP_MODE_OFF_ID:
+			case OP_MODE_DEFAULT_ID:
+			case OP_MODE_UNAVAILABLE_ID:
+			case OP_MODE_UNAVAILABLE_ID_2:
+
+				// no-op
+				break;
+
+			default:
+				throw new ProgramValidationException(
+						ProgramValidationException.I18N_TSTAT_TRANSITION_POINT_INVALID_OPMODE, 0,
+						"Unknown OpModeId: "
+								+ opModeId);
+
+		}
+
+		return;
+	}
+
+	public static void validateTstatTransitionPoint(TstatTransitionPointModel tp, String pgmName) throws ProgramValidationException
+	{
+		initValidationParams();
+
+		// make sure all the validation logic rules pass.
+		// KRMT-2081: standardize and internationalize all error messages
+		if (tp.getMaxTemp() > validationParams.getTstatExtremeMax())
+		{
+			throw new ProgramValidationException(
+					ProgramValidationException.I18N_TSTAT_TRANSITION_POINT_MAX, tp.getProgramId(),
+					tp.getTpId(),
+					Messages.get(I18N_TP_OVERMAX, pgmName, tp.getTpTime().toString("hh:mm a"),
+							tp.getMaxTemp(),
+							validationParams.getTstatExtremeMax()));
+		}
+
+		if (tp.getMinTemp() < validationParams.getTstatExtremeMin())
+		{
+			throw new ProgramValidationException(
+					ProgramValidationException.I18N_TSTAT_TRANSITION_POINT_MIN, tp.getProgramId(),
+					tp.getTpId(),
+					Messages.get(I18N_TP_UNDERMIN, pgmName, tp.getTpTime().toString("hh:mm a"),
+							tp.getMinTemp(),
+							validationParams.getTstatExtremeMin()));
+		}
+
+		int maxMinusPrefCool = tp.getMaxTemp() - tp.getPrefCoolTemp();
+
+		if (maxMinusPrefCool < validationParams.getTstatDiffBetweenMaxAndPrefCoolLowerLimit()
+				|| maxMinusPrefCool > validationParams
+						.getTstatDiffBetweenMaxAndPrefCoolUpperLimit())
+		{
+			throw new ProgramValidationException(
+					ProgramValidationException.I18N_TSTAT_TRANSITION_POINT_COOL, tp.getProgramId(),
+					tp.getTpId(),
+					Messages.get(I18N_TP_COOL_OVERLIMIT, pgmName, tp.getTpTime()
+							.toString("hh:mm a"), tp.getMaxTemp(),
+							tp.getPrefCoolTemp(), maxMinusPrefCool, validationParams
+									.getTstatDiffBetweenMaxAndPrefCoolLowerLimit(),
+							validationParams.getTstatDiffBetweenMaxAndPrefCoolUpperLimit()));
+		}
+
+		int prefHeatMinusMin = tp.getPrefHeatTemp() - tp.getMinTemp();
+
+		if (prefHeatMinusMin < validationParams.getTstatDiffBetweenPrefHeatAndMinLowerLimit()
+				|| prefHeatMinusMin > validationParams
+						.getTstatDiffBetweenPrefHeatAndMinUpperLimit())
+		{
+			throw new ProgramValidationException(
+					ProgramValidationException.I18N_TSTAT_TRANSITION_POINT_HEAT, tp.getProgramId(),
+					tp.getTpId(),
+					Messages.get(I18N_TP_HEAT_OVERLIMIT, pgmName, tp.getTpTime()
+							.toString("hh:mm a"), tp.getPrefHeatTemp(),
+							tp.getMinTemp(), prefHeatMinusMin, validationParams
+									.getTstatDiffBetweenPrefHeatAndMinLowerLimit(),
+							validationParams.getTstatDiffBetweenPrefHeatAndMinUpperLimit()));
+		}
+
+		int prefCoolMinusPrefHeat = tp.getPrefCoolTemp() - tp.getPrefHeatTemp();
+
+		if (prefCoolMinusPrefHeat < validationParams
+				.getTstatDiffBetweenPrefCoolAndPrefHeatLowerLimit() && tp.getOpModeId()!=OP_MODE_OFF_ID)
+
+		{
+			throw new ProgramValidationException(
+					ProgramValidationException.I18N_TSTAT_TRANSITION_POINT_COOL, tp.getProgramId(),
+					tp.getTpId(),
+					Messages.get(I18N_TP_PREF_OVERLIMIT, pgmName, tp.getTpTime()
+							.toString("hh:mm a"), tp.getPrefCoolTemp(),
+							tp.getPrefHeatTemp(), prefCoolMinusPrefHeat,
+							validationParams.getTstatDiffBetweenPrefCoolAndPrefHeatLowerLimit()));
+		}
+
+	}
+
+	/**
+	 * Validate a single standalone instance of a program. This checks for Temperature range issues
+	 * in each of the transition points plus basic sanity checks.
+	 *
+	 * Use validateUserPrograms(List) to validate all of the schedules together.
+	 */
+
+	public static void validateUserProgram(UserProgramModel p, List<EsiTstatModel> tstatList, List<EsiDcModel> dcList)
+			throws ProgramValidationException
+	{
+		initValidationParams();
+
+		boolean throwExceptionIfDCTPListIsNull = true;
+		boolean throwExceptionIfTstatTPListIsNull = true;
+
+		boolean throwExceptionIfDCTPListIsEmpty = true;
+		boolean throwExceptionIfTstatTPListIsEmpty = true;
+
+		if (p == null)
+		{
+			throw new ProgramValidationException(ProgramValidationException.I18N_NULL_PROGRAM, -1,
+					"Program was null");
+		}
+		//check if account has only wifi tstats
+		int wifiTstat=0;
+		for(EsiTstatModel esiTstat:tstatList)
+		{
+			ConsertLogger.info("tstat type id:"+esiTstat.getDeviceTypeId());
+			if(OpsCenterConstants.DEVICE_TYPE_ID_THIRD_PARTY_TSTAT ==esiTstat.getDeviceTypeId())
+			{
+				ConsertLogger.info("tstat type wifi");
+				wifiTstat++;
+			}
+		}
+		
+		if(wifiTstat == tstatList.size() && !tstatList.isEmpty())
+		{
+			ConsertLogger.info("Program Validation not required for third party devices");
+			return;
+		}
+		
+		// Check to see if all transition points are within the range
+		// restrictions configured in conf/messages
+
+		if (p.getTstatTransitionPointCollection() != null)
+		{
+
+			if (throwExceptionIfTstatTPListIsEmpty
+					&& p.getTstatTransitionPointCollection().size() == 0 && tstatList.size() > 0)
+			{ // KRMT-1664 check tstatList size
+				// KRMT-1503:
+				throw new ProgramValidationException(
+						ProgramValidationException.I18N_TSTAT_TRANSITION_MISSING_FOR_TSTAT,
+						p.getProgramId(),
+						Messages.get(I18N_TSTAT_NO_TPS, p.getName(), getTstatNames(tstatList)));
+			}
+
+			HashMap<Integer, HashMap<LocalTime, Boolean>> tpTimeByEsi = new HashMap<Integer, HashMap<LocalTime, Boolean>>();
+
+			for (TstatTransitionPointModel tp : p.getTstatTransitionPointCollection())
+			{
+				validateTstatTransitionPoint(tp, p.getName());
+
+				// Extra validation make sure TP's don't start @ the same time.
+				if (tpTimeByEsi.get(tp.getEsiTstatId()) == null)
+				{
+					tpTimeByEsi.put(tp.getEsiTstatId(), new HashMap<LocalTime, Boolean>());
+				}
+				// Does this time already exist for this ESI?
+				// KRMT-1503: removed OpsCore_Exception code, ESI, programId
+				if (tpTimeByEsi.get(tp.getEsiTstatId()).get(tp.getTpTime()) != null)
+				{
+					throw new ProgramValidationException(
+							ProgramValidationException.I18N_TRANSITION_POINT_TIME_CONFLICT,
+							p.getProgramId(),
+							tp.getTpId(), Messages.get(I18N_TSTAT_SAME_TIME, p.getName(),
+									getTstatName(tp.getEsiTstatId(), tstatList), tp.getTpTime()
+											.toString("hh:mm a")));
+
+				}
+				tpTimeByEsi.get(tp.getEsiTstatId()).put(tp.getTpTime(), new Boolean(true));
+
+			}
+
+			// KRMT-1457 Make sure there is at least one transition point for
+			// each of the Tstats on the account.
+			// Re-use the tpTime by Esi Hash above and look for esi's that come
+			// in that do not have good TP's.
+			// KRMT-1503
+			for (EsiTstatModel tstat : tstatList)
+			{
+				// if no TP's are found for this tstat, then throw an exception
+				
+				if(OpsCenterConstants.DEVICE_TYPE_ID_THIRD_PARTY_TSTAT ==tstat.getDeviceTypeId())
+				{
+					continue;
+				}
+				if (tpTimeByEsi.get(tstat.getEsiTstatId()) == null)
+				{
+					throw new ProgramValidationException(
+							ProgramValidationException.I18N_TSTAT_TRANSITION_MISSING_FOR_TSTAT,
+							p.getProgramId(),
+							tstat.getEsiTstatId(), Messages.get(I18N_TSTAT_NO_TPS, p.getName(),
+									tstat.getName()));
+				}
+			}
+
+		}
+		else
+		{
+			if (throwExceptionIfTstatTPListIsNull && tstatList.size() > 0)
+			{ // KRMT-1664 only thow exceptions if Tstats are present and list
+				// is empty.
+				throw new ProgramValidationException(
+						ProgramValidationException.I18N_TSTAT_TRANSITION_MISSING_FOR_TSTAT, // KRMT-1503
+						p.getProgramId(), Messages.get(I18N_TSTAT_NO_TPS, p.getName(),
+								getTstatNames(tstatList)));
+			}
+		}
+
+		if (p.getDcTransitionPointCollection() != null)
+		{
+
+			if (throwExceptionIfDCTPListIsEmpty && p.getDcTransitionPointCollection().size() == 0
+					&& dcList.size() > 0)
+			{ // KRMT-1664 check dcList size
+				for(EsiDcModel dc : dcList)
+				{
+			    if((p.getProgramId() != 1 && (!OpsCenterConstants.tpUnsupportedDevices.contains(dc.getDeviceTypeId()))) || (p.getProgramId() == 1))
+			    {
+				throw new ProgramValidationException(
+						ProgramValidationException.I18N_TSTAT_TRANSITION_MISSING_FOR_DC, // KRMT-1503
+						p.getProgramId(), Messages.get(I18N_DC_NO_TPS, p.getName(),
+								getDcNames(dcList)));
+			    }
+				}
+			}
+
+			HashMap<Integer, HashMap<LocalTime, Boolean>> tpTimeByEsi = new HashMap<Integer, HashMap<LocalTime, Boolean>>();
+
+			for (DCTransitionPointModel tp : p.getDcTransitionPointCollection())
+			{
+				validateDcTransitionPoint(tp);
+
+				// Extra validation make sure TP's don't start @ the same time.
+				if (tpTimeByEsi.get(tp.getEsiDcId()) == null)
+				{
+					tpTimeByEsi.put(tp.getEsiDcId(), new HashMap<LocalTime, Boolean>());
+				}
+				// Does this time already exist for this ESI?
+				// KRMT-1503: removed OpsCore_Exception code, ESI, programId
+				if (tpTimeByEsi.get(tp.getEsiDcId()).get(tp.getTpTime()) != null)
+				{
+
+					throw new ProgramValidationException(
+							ProgramValidationException.I18N_TRANSITION_POINT_TIME_CONFLICT,
+							p.getProgramId(),
+							tp.getEsiDcId(), Messages.get(I18N_DC_SAME_TIME, p.getName(),
+									getDcName(tp.getEsiDcId(), dcList),
+									tp.getTpTime().toString("hh:mm a")));
+				}
+				tpTimeByEsi.get(tp.getEsiDcId()).put(tp.getTpTime(), new Boolean(true));
+
+			}
+
+			// KRMT-1457 Make sure there is at least one transition point for
+			// each of the Tstats on the account.
+			// Re-use the tpTime by Esi Hash above and look for esi's that come
+			// in that do not have good TP's.
+			// KRMT-1503
+			for (EsiDcModel dc : dcList)
+			{
+				// if no TP's are found for this tstat, then throw an exception
+				if ((!OpsCenterConstants.tpUnsupportedDevices.contains(dc.getDeviceTypeId())) && tpTimeByEsi.get(dc.getEsiDcId()) == null)
+				{
+					throw new ProgramValidationException(
+							ProgramValidationException.I18N_TSTAT_TRANSITION_MISSING_FOR_DC,
+							p.getProgramId(),
+							dc.getEsiDcId(),
+							Messages.get(I18N_DC_NO_TPS, p.getName(), dc.getName()));
+				}
+			}
+
+		}
+		else
+		{
+			if (throwExceptionIfDCTPListIsNull && dcList.size() > 0)
+			{ // KRMT-1664 only throw exceptions if DC's are present and list is
+				// empty.) {
+				// KRMT-1503: removed OpsCore_Exception code
+				for(EsiDcModel dc : dcList)
+				{
+			    if((p.getProgramId() != 1 && (!OpsCenterConstants.tpUnsupportedDevices.contains(dc.getDeviceTypeId()))) || (p.getProgramId() == 1))
+			    {
+				throw new ProgramValidationException(
+						ProgramValidationException.I18N_TSTAT_TRANSITION_MISSING_FOR_DC, // KRMT-1503
+						p.getProgramId(), Messages.get(I18N_DC_NO_TPS, p.getName(),
+								getDcNames(dcList)));
+			    }
+				}
+			    }
+		}
+
+		// check to see if it's scheduled by range, that we have at least 1
+		// range defined.
+		if (p.getSchedByRangeFlag().equals(OPSCENTER_TRUE))
+		{
+			if (p.getProgramScheduleRangeCollection() == null)
+			{
+				// KRMT-1503: removed OpsCore_Exception code
+				throw new ProgramValidationException(
+						ProgramValidationException.I18N_SCHEDULE_RANGES_NULL, p.getProgramId(),
+						Messages.get(
+								I18N_NO_SCHEDULE_BY_RANGE, p.getName()));
+			}
+			if (p.getProgramScheduleRangeCollection().size() <= 0)
+			{
+
+				// This is now a perfectly valid scenario
+				// throw new ProgramValidationException ( p.getProgramId(),
+				// "Schedule By Range Flag is ON, but Schedule Range Collection was empty. Define at least 1 time range."
+				// );
+			}
+		}
+
+		// check to make sure none of the schedule by ranges (non default ) do
+		// not overlap
+
+		// ok!
+	}
+
+	/**
+	 * Master Function to validate all programs individually as well as together in a schedule.
+	 *
+	 * @param programs
+	 * @return
+	 */
+	public static List<ProgramValidationException> validateUserPrograms(ArrayList<UserProgramModel> programs,
+			List<EsiTstatModel> tstatList, List<EsiDcModel> dcList)
+	{
+		ArrayList<ProgramValidationException> out = new ArrayList<ProgramValidationException>();
+
+		// Check each one individually
+		for (UserProgramModel upm : programs)
+		{
+			try
+			{
+				validateUserProgram(upm, tstatList, dcList);
+			}
+			catch (ProgramValidationException x)
+			{
+				out.add(x);
+			}
+		}
+
+		// And check all the schedules together
+		out.addAll(validateUserProgramSchedules(programs));
+
+		return out;
+	}
+
+	/**
+	 * Validate that the schedule is sane, there are no overlaps in the schedules.
+	 *
+	 * Warning: This returns an array of validation exceptions, does not throw a single X.
+	 *
+	 *
+	 * @param programs
+	 */
+	public static ArrayList<ProgramValidationException> validateUserProgramSchedules(ArrayList<UserProgramModel> programs)
+
+	{
+		// Consider all of the Schedules together.
+		ArrayList<ProgramValidationException> out = new ArrayList<ProgramValidationException>();
+
+		// KRMT-1503: to include names of conflicting programs
+		HashMap<String, Interval> programIntervalPile = new HashMap<String, Interval>();
+		ConsertLogger.info("validateUserProgramSchedules .programIntervalPile: " + programIntervalPile);
+		for (UserProgramModel p : programs)
+		{
+			ConsertLogger.info("validateUserProgramSchedules .iterating through program: name " + p.getName() + " programschedulerangecollection " + p.getProgramScheduleRangeCollection().size());
+			ConsertLogger.info("validateUserProgramSchedules inside for loop programIntervalPile " + programIntervalPile);
+			// Skip the default program
+			if (p.getDefaultFlag().equals(OPSCENTER_TRUE))
+			{
+				continue;
+			}
+			if (p.getSchedByRangeFlag().equals(OPSCENTER_FALSE))
+			{
+				continue;
+			}
+
+			for (ProgramScheduleRangeModel psr : p.getProgramScheduleRangeCollection())
+			{
+
+				ConsertLogger.info("validateUserProgramSchedules iterating through programschedulerange start date " + psr.getStartDate());
+				ConsertLogger.info("validateUserProgramSchedules iterating through programschedulerange end date " + psr.getEndDate());
+				ConsertLogger.info("validateUserProgramSchedules programIntervalPile " + programIntervalPile);
+				// note that program schedules are End Date inclusive.
+				Interval i = new Interval(psr.getStartDate().toDateTimeAtStartOfDay(), psr
+						.getEndDate().plusDays(1).toDateTimeAtStartOfDay());
+				ConsertLogger.info("validateUserProgramSchedules i " + i);
+				for (Map.Entry<String, Interval> entry : programIntervalPile.entrySet())
+				{
+					String existName = entry.getKey();
+					Interval exist = entry.getValue();
+					ConsertLogger.info("validateUserProgramSchedules iterating programIntervalPile " + existName + " value " + exist);
+					// Any collisions?
+
+					if (exist.overlaps(i))
+					{
+						ConsertLogger.info("validateUserProgramSchedules exist overlaps " + exist.overlaps(i));
+						out.add(new ProgramValidationException(
+								ProgramValidationException.I18N_SCHEDULE_OVERLAP, p.getProgramId(),
+								Messages.get(
+										I18N_CONFLICT_SCHEDULES, p.getName(), i.getStart()
+												.toString("MM/dd/yyyy"),
+										i.getEnd().minusDays(1).toString("MM/dd/yyyy"), existName, exist
+												.getStart().toString("MM/dd/yyyy"),
+										exist.getEnd().minusDays(1).toString("MM/dd/yyyy"))));
+					}
+				}
+
+				// Add the new guy to the pile
+				programIntervalPile.put(p.getName(), i);
+				ConsertLogger.info("validateUserProgramSchedules after putting value in programIntervalPile " + programIntervalPile);
+			}
+
+		}
+
+		return out;
+	}
+}

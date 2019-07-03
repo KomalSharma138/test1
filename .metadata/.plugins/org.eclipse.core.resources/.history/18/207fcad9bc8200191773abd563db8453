@@ -1,0 +1,516 @@
+package controllers.json;
+
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.SortedSet;
+
+import models.JsonCeDefinitionModel;
+import models.JsonOutgoingCeLogModel;
+import models.JsonOutgoingControlEventAccountStates;
+import models.JsonOutgoingControlEventSeries;
+
+import org.joda.time.DateTime;
+import org.joda.time.DateTimeZone;
+
+import play.i18n.Messages;
+import play.mvc.With;
+
+import com.consert.core.ejb.constant.OpsCenterConstants;
+import com.consert.core.ejb.constant.OpsCenterConstants.DeviceType;
+import com.consert.core.ejb.exception.AbstractOpsCenterException;
+import com.consert.core.ejb.session.interfaces.AutoControlEventBeanRemote;
+import com.consert.core.ejb.session.interfaces.CeDefinitionBeanRemote;
+import com.consert.core.ejb.session.interfaces.ControlEventPowerBeanRemote;
+import com.consert.core.ejb.session.interfaces.GenericBeanRemote;
+import com.consert.core.model.CeDayGroupModel;
+import com.consert.core.model.CeDefinitionModel;
+import com.consert.core.model.CeGroupMapModel;
+import com.consert.core.model.CeLogModel;
+import com.consert.core.model.ControlEventBroadCastWindow;
+import com.consert.core.model.ControlEventDataFilterCriteriaModel;
+import com.consert.core.model.ControlEventModel;
+import com.consert.core.model.ControlEventPowerModel;
+import com.consert.core.model.DeviceStatusInfo;
+import com.consert.core.model.DeviceTypeModel;
+import com.consert.core.model.GroupPowerModel;
+import com.consert.utils.googleCharts.DeviceTypeDecorator;
+import com.consert.utils.googleCharts.GroupStates;
+import com.consert.web.datamart.JsonBidirectionalDataMartFilter;
+import com.consert.web.datamart.JsonDataMartDeviceTracker;
+import com.consert.web.util.CacheUtility;
+import com.consert.web.util.ConsertLogger;
+import com.consert.web.util.JsonResponse;
+import com.consert.web.util.JsonUtility;
+import com.consert.web.util.MessageUtility;
+import com.consert.web.util.SessionBeanFactory;
+
+import controllers.Check;
+import controllers.ConsertUtilityController;
+import controllers.Secure;
+
+/**
+ * Provides a proxy to a back end search service, designed to modularize Solr for possible
+ * replacement one day.
+ *
+ * @author brockman
+ *
+ */
+// Lock it down!
+@With(Secure.class)
+@Check(OpsCenterConstants.FN_CONTROL_EVENT)
+public class JsonControlEvent extends ConsertUtilityController
+{
+	private static final String DEVICE_TYPE_LIST_KEY = "deviceTypeList";
+	private static final String POWER_REMOVED_KEY = "powerRemoved";
+	private static final String GATEWAYS_AVAILABLE_KEY = "gatewaysAvailable";
+	private static final String POWER_AVAILABLE_KEY = "powerAvailable";
+	private static final String GROUPS_KEY = "groups";
+
+	public static void deviceStatesByDeviceTypes(Integer controlEventId, Integer tenantId)
+	{
+		ConsertLogger.info("[ENTER] void JsonControlEvent.deviceStatesByDeviceTypes(" + controlEventId
+				+ ") for tenant : "+tenantId);
+
+		ControlEventPowerBeanRemote cePowerBean = SessionBeanFactory.getControlEventPowerBean();
+
+		ControlEventModel ce = cePowerBean.getControlEventModelByCeId(controlEventId, tenantId);
+
+		JsonBidirectionalDataMartFilter filter = new JsonBidirectionalDataMartFilter();
+		filter.setControlEventId(controlEventId);
+		filter.setInterval(JsonBidirectionalDataMartFilter.INTERVAL_15MINUTES);
+		filter.setMartId(JsonDataMartDeviceTracker.ACTIVE_DEVICES_IN_EVENT);
+		filter.setStart(ce.getStartTime().toString());
+		filter.setStop(ce.getStopTime().toString());
+
+		ConsertLogger.info("[ EXIT] JsonControlEvent.deviceStatesByDeviceTypes");
+
+		JsonDataMart.rest(filter.toJson(true));
+	}
+
+	public static void powerConsumedByDeviceType(Integer controlEventId, Integer tenantId)
+	{
+		ConsertLogger.info("[ENTER] void JsonControlEvent.powerConsumedByDeviceType(" + controlEventId
+				+ ") for tenant : "+tenantId);
+
+		ControlEventPowerBeanRemote cePowerBean = SessionBeanFactory.getControlEventPowerBean();
+
+		ControlEventModel ce = cePowerBean.getControlEventModelByCeId(controlEventId, tenantId);
+
+		JsonBidirectionalDataMartFilter filter = new JsonBidirectionalDataMartFilter();
+		filter.setControlEventId(controlEventId);
+		filter.setInterval(JsonBidirectionalDataMartFilter.INTERVAL_15MINUTES);
+		filter.setMartId(OpsCenterConstants.POWER_CONSUMED_BY_DEVICE_TYPE);
+		filter.setStart(ce.getStartTime().toString());
+		filter.setStop(ce.getStopTime().toString());
+
+		ConsertLogger.info("[ EXIT] JsonControlEvent.powerConsumedByDeviceType");
+
+		JsonDataMart.rest(filter.toJson(true));
+	}
+
+	public static void getDeviceStatusForControlEvent(Integer controlEventId, Integer tenantId)
+	{
+		ConsertLogger.info(
+				"[ENTER] JsonControlEvent.getDeviceStatusForControlEvent(" + controlEventId + ") for tenant : "+tenantId);
+
+		GenericBeanRemote genericBean = SessionBeanFactory.getGenericBean();
+		List<DeviceStatusInfo> deviceStatusInfoList = genericBean
+				.getDeviceStatusForConservationEvent(controlEventId, tenantId);
+
+		JsonResponse resp = new JsonResponse(true, deviceStatusInfoList);
+
+		ConsertLogger.info("[ EXIT]  JsonControlEvent.getDeviceStatusForControlEvent");
+
+		renderJSON(resp, JsonUtility.getJodaLocalDateSerializer(),
+				JsonUtility.getJodaDateTimeSerializer());
+	}
+
+	public static void getDeviceStatusReportEnabled(Integer tenantId)
+	{
+		GenericBeanRemote genericEjb = SessionBeanFactory.getGenericBean();
+		String propertyValue = genericEjb.getUtilityPropertyByKeyOrProperty("DEVICE_STATUS_REPORT", tenantId);
+		JsonResponse resp = new JsonResponse(true, propertyValue);
+		renderJSON(resp);
+	}
+
+	public static void getFutureCyclingCeWindow(Integer tenantId)
+	{
+		ConsertLogger.info("[ENTER] JsonControlEvent.getFutureCyclingCeWindow()");
+
+		ControlEventPowerBeanRemote controlEventBean = SessionBeanFactory
+				.getControlEventPowerBean();
+		List<ControlEventBroadCastWindow> ceBroadCastWindowList = controlEventBean
+				.getFutureCyclingCeWindow(tenantId);
+
+		JsonResponse resp = null;
+		
+		if (ceBroadCastWindowList != null 
+				&& !ceBroadCastWindowList.isEmpty()
+				&& controlEventBean.isCCBroadcast(tenantId))
+		{
+			resp = new JsonResponse(true, ceBroadCastWindowList);
+		}
+		else
+		{
+			resp = new JsonResponse(false);
+		}
+
+		ConsertLogger.info("[ EXIT] JsonControlEvent.getFutureCyclingCeWindow");
+		
+		renderJSON(resp, JsonUtility.getJodaLocalDateSerializer(),
+				JsonUtility.getJodaDateTimeSerializer());
+	}
+
+	/**
+	 * Returns power available
+	 *
+	 * @author Josh Skidmore <jskidmore@consert.com>
+	 */
+	public static void availablePower(Integer controlEventId, String includeGroups,
+			String includeDeviceTypes, String eventModeString, Integer tenantId)
+	{
+		ConsertLogger.info("[ENTER] void JsonControlEvent.availablePower(" + controlEventId + ", "
+				+ includeGroups + ", " + includeDeviceTypes + ", " + eventModeString + ")");
+
+		JsonResponse resp = null;
+		HashMap<String, Object> jsonOutput = new HashMap<String, Object>();
+		String ceName = Messages.get("lang.label.ce.name");
+
+		ControlEventPowerBeanRemote cePowerBean = SessionBeanFactory.getControlEventPowerBean();
+		
+		AutoControlEventBeanRemote autoControlEventBean = SessionBeanFactory.getAutoControlEventBean();		
+		List<CeDayGroupModel> totalMinsInCEList = autoControlEventBean.getTotalMinsInCe(tenantId);		
+		Map<Integer, Integer> minInCEGroupMap = new HashMap<Integer, Integer>();		
+		if(totalMinsInCEList != null && totalMinsInCEList.size() > 0) {
+			for(CeDayGroupModel ceDayGroupModel : totalMinsInCEList) {
+				minInCEGroupMap.put(ceDayGroupModel.getCeGroupId(), ceDayGroupModel.getTotalMinsInCe());
+			}
+		}
+		
+		ControlEventModel editCe = null;
+		if (controlEventId != null && controlEventId > 0)
+		{
+			editCe = cePowerBean.getControlEventDetails(controlEventId, tenantId);
+			jsonOutput.put("controlEventId", controlEventId);
+
+			if (editCe == null)
+			{
+				resp = new JsonResponse(false, "Unable to find " + ceName + " Id: "
+						+ controlEventId + " to edit");
+				renderJSON(resp, JsonUtility.getJodaLocalDateSerializer(),
+						JsonUtility.getJodaLocalTimeSerializer(),
+						JsonUtility.getJodaDateTimeSerializer());
+			}
+		}
+
+		OpsCenterConstants.eventMode eventMode = null;
+
+		if (OpsCenterConstants.eventMode.VPP.toString().equals(eventModeString))
+		{
+			eventMode = OpsCenterConstants.eventMode.VPP;
+		}
+		else if (OpsCenterConstants.eventMode.CYCLING.toString().equals(eventModeString))
+		{
+			eventMode = OpsCenterConstants.eventMode.CYCLING;
+		}
+
+		ControlEventPowerModel powerAvail = null;
+
+		if (controlEventId != null)
+		{
+			powerAvail = cePowerBean.getPowerAvail(controlEventId, tenantId);
+		}
+		else if (eventMode != null)
+		{
+			powerAvail = cePowerBean.getPowerAvail(eventMode, tenantId);
+		}
+		else
+		{
+			powerAvail = cePowerBean.getPowerAvail(tenantId);
+		}
+		
+
+		if (powerAvail == null)
+		{
+			resp = new JsonResponse(false, "Unable to determine " + ceName
+					+ " Power Available at this time.");
+			renderJSON(resp, JsonUtility.getJodaLocalDateSerializer(),
+					JsonUtility.getJodaLocalTimeSerializer(),
+					JsonUtility.getJodaDateTimeSerializer());
+			return;
+		}
+
+		ConsertLogger.info("powerAvail : " + powerAvail);
+		if (powerAvail.getGroupPowerList() == null
+				|| powerAvail.getGroupPowerList().size() == 0)
+		{
+			resp = new JsonResponse(false, "Unable to determine " + ceName
+					+ " Power Available By Group at this time.");
+			renderJSON(resp, JsonUtility.getJodaLocalDateSerializer(),
+					JsonUtility.getJodaLocalTimeSerializer(),
+					JsonUtility.getJodaDateTimeSerializer());
+		}
+
+		jsonOutput.put(POWER_AVAILABLE_KEY, powerAvail.getPowerAvailable());
+		jsonOutput.put(POWER_REMOVED_KEY, powerAvail.getPowerRemoved());
+		jsonOutput.put(GATEWAYS_AVAILABLE_KEY, powerAvail.getNumberOfGateways());
+
+		if (includeGroups != null)
+		{
+			List<GroupPowerModel> groupPowerModelList = powerAvail.getGroupPowerList();
+
+			if(groupPowerModelList != null && groupPowerModelList.size() > 0) {
+				boolean isPwrRequestedinPercent = false;
+				List<CeGroupMapModel> percentageModels = null;
+
+				if (editCe != null
+						&& editCe.getPowerRequestedInPercent().equals(OpsCenterConstants.TRUE))	{
+					percentageModels = editCe.getCeGroupMapModelCollection();
+
+					ConsertLogger.info("percentageModels : " + percentageModels);
+					isPwrRequestedinPercent = true;
+				}
+				ConsertLogger.info("minInCEGroupMap = "+minInCEGroupMap);
+				for (GroupPowerModel gpm : groupPowerModelList)	{
+					gpm.setTotalMinsInCE(
+							minInCEGroupMap.get(gpm.getGrpId()));
+					if(isPwrRequestedinPercent) {
+						if(percentageModels != null && percentageModels.size() > 0) {							
+							for (CeGroupMapModel ceGroupMapModel : percentageModels) {
+								if (gpm.getGrpId() == ceGroupMapModel.getCeGroupId()) {
+									ConsertLogger.info("Changing grpId " + gpm.getGrpId() + " powerRemoved to "
+											+ ceGroupMapModel.getPowerToRemoveInPercent());									
+									gpm.setPowerToRemove(ceGroupMapModel.getPowerToRemoveInPercent());
+								}
+							}
+						}
+						
+					}
+				}
+				
+			}
+
+			//removeNoPowerAvaialbleGroups(groupPowerModelList);			
+			jsonOutput.put(GROUPS_KEY, groupPowerModelList);
+		}
+
+		// Add the available device Types.
+		List<DeviceTypeDecorator> deviceTypeList = new ArrayList<DeviceTypeDecorator>();
+
+		if (includeDeviceTypes != null)
+		{
+			Map<String, Double> totalPowerAvailableByDeviceTypeID = powerAvail
+					.getPowerAvailByDeviceTypeID();
+
+			GenericBeanRemote genEjb = SessionBeanFactory.getGenericBean();
+
+			String[] deviceTypeIds = genEjb.getCeValidDeviceTypeIds(tenantId);
+			for (String deviceTypeId : deviceTypeIds)
+			{
+				String allowEdits = OpsCenterConstants.TRUE;
+
+				// New way of checking each deviceType ID dynamically.
+				if (editCe != null)
+				{
+					allowEdits = OpsCenterConstants.FALSE;
+
+					boolean matchesExistingCeType = false;
+					for (String includedDeviceTypeId : editCe.getIncludedDeviceTypeIds())
+					{
+						if (includedDeviceTypeId.equals(deviceTypeId))
+						{
+							matchesExistingCeType = true;
+						}
+					}
+
+					allowEdits = matchesExistingCeType ? OpsCenterConstants.TRUE
+							: OpsCenterConstants.FALSE;
+				}
+
+				deviceTypeList.add(new DeviceTypeDecorator(deviceTypeId, Messages
+						.get("label.deviceTypeId." + deviceTypeId),
+						totalPowerAvailableByDeviceTypeID.get(deviceTypeId), allowEdits));
+			}
+
+			jsonOutput.put(DEVICE_TYPE_LIST_KEY, deviceTypeList);
+		}
+
+		/*
+		 * HMBRD-369 Add broadcast flag to JSON output
+		 */
+		jsonOutput.put("broadcast", new Boolean(cePowerBean.isCCBroadcast(tenantId)));
+		
+		ConsertLogger.info("[ EXIT] JsonControlEvent.availablePower");
+
+		resp = new JsonResponse(true, jsonOutput);
+
+		renderJSON(resp, JsonUtility.getJodaLocalDateSerializer(),
+				JsonUtility.getJodaLocalTimeSerializer(), JsonUtility.getJodaDateTimeSerializer());
+	}
+
+	public static void groupStates(int controlEventId, Integer tenantId)
+	{
+		ConsertLogger.info("[ENTER] void JsonControlEvent.groupStates(" + controlEventId + ") for tenant : "+tenantId);
+
+		ControlEventPowerBeanRemote ceEjb = SessionBeanFactory.getControlEventPowerBean();
+
+		// Turn the Maps into the JSON Object
+		JsonOutgoingControlEventAccountStates out = new JsonOutgoingControlEventAccountStates();
+
+		// Initialize the data series
+		for (String element : JsonOutgoingControlEventSeries.STATES_ORDERED)
+		{
+			JsonOutgoingControlEventSeries series = new JsonOutgoingControlEventSeries();
+			series.setId(element);
+			out.getSeries().add(series);
+		}
+
+		GroupStates groupStates = new GroupStates();
+
+		List<CeGroupMapModel> ceGroupMapModelCollection = ceEjb
+				.getCeGroupMapModelCollection(controlEventId, tenantId);
+		for (CeGroupMapModel map : ceGroupMapModelCollection)
+		{
+			String groupName = map.getCeGroupName();
+			int initial = map.getInitial().size();
+			int inProgress = map.getInProgress().size();
+			int drifted = map.getDrifted().size();
+			int optingOut = map.getOptingOut().size();
+			int optedOut = map.getOptedOut().size();
+			int stopping = map.getStopping().size();
+			int stopped = map.getStopped().size();
+
+			groupStates.addRecord(groupName, initial, inProgress, drifted, optingOut, optedOut,
+					stopping, stopped);
+		}
+
+		ConsertLogger.info("[ EXIT] JsonControlEvent.groupStates");
+
+		renderJSON(groupStates);
+	}
+
+	public static void ceDefinitions(Integer controlEventId, Integer tenantId) throws AbstractOpsCenterException
+	{
+		Map<String, HashMap<Integer, JsonCeDefinitionModel>> ceDefModelMap = populateCeDefinitions(
+				controlEventId, tenantId);
+
+		if (ceDefModelMap.isEmpty())
+		{
+			if (controlEventId == null || controlEventId == 0)
+			{
+				renderJSON("No CE Definitions found");
+			}
+			else
+			{
+				renderJSON("No CE Definition found for controlEventId " + controlEventId);
+			}
+			return;
+		}
+
+		renderJSON(ceDefModelMap);
+	}
+
+	public static Map<String, HashMap<Integer, JsonCeDefinitionModel>> populateCeDefinitions(
+			Integer controlEventId, Integer tenantId) throws AbstractOpsCenterException
+	{
+		ConsertLogger.info(
+				"[ENTER] Map<String, HashMap<Integer, JsonCeDefinitionModel>> JsonControlEvent.populateCeDefinitions(controlEventId = "
+						+ controlEventId + ") for tenant : "+tenantId);
+
+		CeDefinitionBeanRemote ceDefinitionBean = SessionBeanFactory.getCeDefinitionBean();
+		List<CeDefinitionModel> ceDefinitionList = new ArrayList<CeDefinitionModel>();
+
+		if (controlEventId == null || controlEventId == 0)
+		{
+			ceDefinitionList = ceDefinitionBean.retrieveDefinitions(tenantId);
+		}
+		else
+		{
+			CeDefinitionModel currentCeDefn = ceDefinitionBean
+					.retrieveDefinitionByCeId(controlEventId, tenantId);
+
+			if (currentCeDefn != null)
+			{
+				ceDefinitionList.add(currentCeDefn);
+			}
+		}
+
+		Map<String, HashMap<Integer, JsonCeDefinitionModel>> ceDefnMap = new HashMap<String, HashMap<Integer, JsonCeDefinitionModel>>();
+		HashMap<Integer, JsonCeDefinitionModel> groupCeDefnMap = new HashMap<Integer, JsonCeDefinitionModel>();
+		HashMap<Integer, JsonCeDefinitionModel> deviceCeDefnMap = new HashMap<Integer, JsonCeDefinitionModel>();
+
+		for (CeDefinitionModel ceDefinitionModel : ceDefinitionList)
+		{
+			JsonCeDefinitionModel ceDefnModel = new JsonCeDefinitionModel(ceDefinitionModel);
+			
+			if (ceDefnModel.getCyclingType().equalsIgnoreCase(JsonCeDefinitionModel.GROUP_CE_DEFN))
+			{
+				groupCeDefnMap.put(ceDefinitionModel.getDefinitionId(), ceDefnModel);
+			}
+			else if (ceDefnModel.getCyclingType()
+					.equalsIgnoreCase(JsonCeDefinitionModel.DEVICE_CE_DEFN))
+			{
+				if (null != controlEventId && controlEventId > 0)
+				{
+					int ceDefId = ceDefinitionModel.getDefinitionId();
+					CeDefinitionModel originalCeDef = ceDefinitionBean.retrieveDefinitionById(ceDefId, tenantId);
+					mapCeDefDutyCyleByDeviceTypeValues(originalCeDef, ceDefnModel);
+					
+				}
+				deviceCeDefnMap.put(ceDefinitionModel.getDefinitionId(), ceDefnModel);
+			}
+		}
+
+		ceDefnMap.put(JsonCeDefinitionModel.GROUP_CE_DEFN, groupCeDefnMap);
+		ceDefnMap.put(JsonCeDefinitionModel.DEVICE_CE_DEFN, deviceCeDefnMap);
+
+		ConsertLogger.info("[ EXIT] JsonControlEvent.populateCeDefinitions");
+
+		return ceDefnMap;
+	}
+	
+	
+	private static void mapCeDefDutyCyleByDeviceTypeValues(CeDefinitionModel ceDefinitionModel, JsonCeDefinitionModel jsonCeDefinitionModel)
+	{
+
+		int[] deviceTypeIdList = {
+				DeviceType.THERMOSTAT.getId(),
+				DeviceType.WATER_HEATER.getId(),
+				DeviceType.POOL_PUMP.getId(),
+				DeviceType.AC_SWITCH.getId(),
+				DeviceType.SINGLE_HEAT.getId(),
+				DeviceType.DUAL_HEAT.getId(),
+				DeviceType.IRRIGATION_PUMP.getId(),
+				DeviceType.CROP_HEAT.getId(),
+				DeviceType.GENERATOR.getId()
+		};
+		
+		List<DeviceTypeModel> orderedList = new ArrayList<DeviceTypeModel>();
+		
+		for (int devTypeId : deviceTypeIdList)
+		{
+			for (DeviceTypeModel deviceType : ceDefinitionModel.getAssociatedDeviceTypes())
+			{
+				if (devTypeId == deviceType.getDeviceTypeId())
+				{
+					orderedList.add(deviceType);
+				}
+			}
+		}
+				
+		for (DeviceTypeModel deviceType : orderedList)
+		{
+			int deviceTypeId = deviceType.getDeviceTypeId();
+
+			String deviceTypeName = "";
+
+			deviceTypeName = DeviceType.fromId(deviceTypeId).getWsiValue();
+			
+			jsonCeDefinitionModel.getCeDefDutyCycle().put(deviceTypeName, deviceType.getDutyCycle().trim());
+
+		}
+	}
+}

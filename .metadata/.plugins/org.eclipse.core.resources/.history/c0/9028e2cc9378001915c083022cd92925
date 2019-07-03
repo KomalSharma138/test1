@@ -1,0 +1,5425 @@
+/**
+ *
+ */
+package com.consert.core.ejb.session;
+
+import static org.apache.commons.collections.CollectionUtils.isNotEmpty;
+
+import java.io.IOException;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collection;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import java.util.Set;
+import java.util.zip.CRC32;
+import java.util.zip.Checksum;
+
+import javax.ejb.EJB;
+import javax.ejb.Stateless;
+
+import net.sf.ehcache.Cache;
+import net.sf.ehcache.CacheManager;
+import net.sf.ehcache.Element;
+import net.sf.ehcache.search.Attribute;
+import net.sf.ehcache.search.Direction;
+import net.sf.ehcache.search.Query;
+import net.sf.ehcache.search.Result;
+import net.sf.ehcache.search.Results;
+
+import org.joda.time.DateTime;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import com.consert.core.ejb.cache.AccountSyncCacheData;
+import com.consert.core.ejb.cache.AccountUserSyncCacheData;
+import com.consert.core.ejb.cache.CEAccountMapCacheData;
+import com.consert.core.ejb.cache.CEDevicesCacheData;
+import com.consert.core.ejb.cache.CEGroupCacheData;
+import com.consert.core.ejb.cache.CEGroupMapCacheData;
+import com.consert.core.ejb.cache.CEGroupPowerCacheData;
+import com.consert.core.ejb.cache.ControlEventCacheData;
+import com.consert.core.ejb.cache.DeviceOtaCacheData;
+import com.consert.core.ejb.cache.EsiAlertCacheData;
+import com.consert.core.ejb.cache.EsiCacheData;
+import com.consert.core.ejb.cache.EsiDcCacheData;
+import com.consert.core.ejb.cache.EsiDcFlagCacheData;
+import com.consert.core.ejb.cache.EsiGatewayCacheData;
+import com.consert.core.ejb.cache.EsiTstatCacheData;
+import com.consert.core.ejb.cache.GridStreamTstatCacheData;
+import com.consert.core.ejb.cache.OtaParametersCacheData;
+import com.consert.core.ejb.cache.TstatRelayDescriptor;
+import com.consert.core.ejb.constant.DefaultResources;
+import com.consert.core.ejb.constant.OpsCenterConstants;
+import com.consert.core.ejb.exception.AbstractOpsCenterException;
+import com.consert.core.ejb.exception.DatabaseUpdateFailed;
+import com.consert.core.ejb.multitenant.TenantContext;
+import com.consert.core.ejb.session.facade.interfaces.ControlEventBeanFacadeLocal;
+import com.consert.core.ejb.session.facade.interfaces.DeviceBeanFacadeLocal;
+import com.consert.core.ejb.session.facade.interfaces.EsiBeanFacadeLocal;
+import com.consert.core.ejb.session.facade.interfaces.GenericFacadeLocal;
+import com.consert.core.ejb.session.facade.interfaces.UserAccountBeanFacadeLocal;
+import com.consert.core.ejb.session.interfaces.local.ControlEventPowerBeanLocal;
+import com.consert.core.ejb.session.interfaces.local.GenericBeanLocal;
+import com.consert.core.ejb.session.interfaces.local.UserBeanLocal;
+import com.consert.core.ejb.session.messages.GridStreamMessagesGroupBean;
+import com.consert.core.entities.CeAccountMap;
+import com.consert.core.entities.CeDefinition;
+import com.consert.core.entities.CeDevices;
+import com.consert.core.entities.CeGroup;
+import com.consert.core.entities.CeGroupAccountMap;
+import com.consert.core.entities.CeGroupMap;
+import com.consert.core.entities.CeGroupPower;
+import com.consert.core.entities.ControlEvent;
+import com.consert.core.entities.Dc;
+import com.consert.core.entities.DefinitionDeviceMap;
+import com.consert.core.entities.DeliveryNetwork;
+import com.consert.core.entities.Device;
+import com.consert.core.entities.DeviceType;
+import com.consert.core.entities.Esi;
+import com.consert.core.entities.EsiAlert;
+import com.consert.core.entities.EsiDc;
+import com.consert.core.entities.EsiGateway;
+import com.consert.core.entities.EsiLcs;
+import com.consert.core.entities.EsiTstat;
+import com.consert.core.entities.OtaParameters;
+import com.consert.core.entities.TstatDcMap;
+import com.consert.core.entities.TstatWallPlate;
+import com.consert.core.entities.UtilityProperty;
+import com.consert.core.utils.EsiCacheKeyBuilder;
+import com.consert.core.utils.PropertyUtil;
+import com.consert.core.utils.TenantPropertyUtil;
+import com.consert.ehcache.MultiTenantCacheConfig;
+
+/**
+ * @author brodriguez
+ *
+ */
+@Stateless
+public class CacheManagerBean
+{
+
+	private Logger logger = LoggerFactory.getLogger(getClass());
+
+	//private net.sf.ehcache.CacheManager cacheManager;
+
+	private static Map<Integer, Cache> gwEsiCacheMap = new HashMap<Integer, Cache>();
+	private static Map<Integer, Cache> gwDCCacheMap = new HashMap<Integer, Cache>();
+	private static Map<Integer, Cache> gwTstatCacheMap = new HashMap<Integer, Cache>();
+	// CE caches
+	private static Map<Integer, Cache> ceGrpCacheMap = new HashMap<Integer, Cache>();
+	private static Map<Integer, Cache> ceGrpPowerCacheMap = new HashMap<Integer, Cache>();
+	private static Map<Integer, Cache> ceGrpMapCacheMap = new HashMap<Integer, Cache>();
+	private static Map<Integer, Cache> ceDevCacheMap = new HashMap<Integer, Cache>();
+	private static Map<Integer, Cache> controlEventCacheMap = new HashMap<Integer, Cache>();
+	private static Map<Integer, Cache> ceAccMapCacheMap = new HashMap<Integer, Cache>();
+	private static Map<Integer, Cache> broadcastCacheMap = new HashMap<Integer, Cache>();
+	private static Map<Integer, Cache> defaultTemplateCacheMap = new HashMap<Integer, Cache>();
+	private static Map<Integer, Cache> compoundKeyCacheMap = new HashMap<Integer, Cache>();
+ 
+	// synch scheduled changes between utility accounts and Consert accounts
+	private static Map<Integer, Cache> accountSyncCacheMap = new HashMap<Integer, Cache>();
+	private static Map<Integer, Cache> accountUserSyncCacheMap = new HashMap<Integer, Cache>();
+	private static Map<Integer, Cache> gsTstatCacheMap = new HashMap<Integer, Cache>();
+	private static Map<Integer, Cache> otaParamCacheMap = new HashMap<Integer, Cache>();
+	private static Map<Integer, Cache> deviceOtaCacheMap = new HashMap<Integer, Cache>();
+
+	private int staleTimeMin = -1;
+	private Map<Integer, Integer> readingIntervalMinByNetwork = new HashMap<Integer, Integer>();
+
+	@EJB
+	private EsiBeanFacadeLocal esiBeanFacade;
+
+	@EJB
+	private GenericFacadeLocal genericFacade;
+
+	@EJB
+	private GenericBeanLocal genericBean;
+
+	@EJB
+	private ControlEventBeanFacadeLocal controlEventBeanFacade;
+
+	@EJB
+	private UserAccountBeanFacadeLocal userAccountBeanFacade;
+
+	@EJB
+	private DeviceBeanFacadeLocal deviceBeanFacade;
+
+	@EJB
+	private ControlEventBean controlEventBean;
+
+	@EJB
+	private UserBeanLocal userBean;
+
+	@EJB
+	private ControlEventPowerBeanLocal controlEventPowerBean;
+
+	@EJB
+	private CacheManagerBean cacheManagerBean;
+
+	private static List<Integer> ceActiveEsiDcIdList = new ArrayList<Integer>();
+	private static DateTime lastTSCeActiveListUpdated = new DateTime();
+
+	private static Map<Integer, List<CEAccountMapCacheData>> ceAccountMapCacheDataListByEsiIdMap = new HashMap<Integer, List<CEAccountMapCacheData>>();
+	private static DateTime lastTSAccountMapCacheDataListUpdated = new DateTime();
+
+	public CacheManagerBean()
+	{
+		Integer tenantId = TenantContext.getCurrentTenant();
+		if(tenantId != null) {
+			createAllCacheForTenantId(tenantId);
+		}
+	}
+	
+	public void loadCacheForTenantId(Integer tenantId) {
+		logger.debug("Enter loadCacheForTenantId():");
+		TenantContext.setCurrentTenant(tenantId);
+		createAllCacheForTenantId(tenantId);
+	}
+	
+	public CacheManager getCacheManagerByTenantId(Integer tenantId) {
+		return MultiTenantCacheConfig.getInstanceByTenantId(tenantId);
+	}
+
+	/**
+	 * The method will create all the cache for input tenant id
+	 * @param tenantId
+	 */
+	public void createAllCacheForTenantId(Integer tenantId) {
+		
+		String tenantIdStr = String.valueOf(tenantId);
+		
+		gwEsiCacheMap.put(tenantId, getCacheManagerByTenantId(tenantId).getCache(OpsCenterConstants.GW_ESI_DATA.concat(tenantIdStr)));
+		gwDCCacheMap.put(tenantId, getCacheManagerByTenantId(tenantId).getCache(OpsCenterConstants.GW_DC_DATA.concat(tenantIdStr)));
+		gwTstatCacheMap.put(tenantId, getCacheManagerByTenantId(tenantId).getCache(OpsCenterConstants.GW_TSTAT_DATA.concat(tenantIdStr)));
+
+		ceGrpCacheMap.put(tenantId, getCacheManagerByTenantId(tenantId).getCache(OpsCenterConstants.CE_GRP_CACHE.concat(tenantIdStr)));
+		ceGrpPowerCacheMap.put(tenantId, getCacheManagerByTenantId(tenantId).getCache(OpsCenterConstants.CE_GRP_POWER_CACHE.concat(tenantIdStr)));
+		ceGrpMapCacheMap.put(tenantId, getCacheManagerByTenantId(tenantId).getCache(OpsCenterConstants.CE_GRP_MAP_CACHE.concat(tenantIdStr)));
+		ceAccMapCacheMap.put(tenantId, getCacheManagerByTenantId(tenantId).getCache(OpsCenterConstants.CE_ACC_MAP_CACHE.concat(tenantIdStr)));
+
+		ceDevCacheMap.put(tenantId, getCacheManagerByTenantId(tenantId).getCache(OpsCenterConstants.CE_DEV_CACHE.concat(tenantIdStr)));
+		controlEventCacheMap.put(tenantId, getCacheManagerByTenantId(tenantId).getCache(OpsCenterConstants.CONTROL_EVENT_CACHE.concat(tenantIdStr)));
+
+		broadcastCacheMap.put(tenantId, getCacheManagerByTenantId(tenantId).getCache(OpsCenterConstants.BROADCAST_CACHE_NAME.concat(tenantIdStr)));
+		defaultTemplateCacheMap.put(tenantId, getCacheManagerByTenantId(tenantId).getCache(OpsCenterConstants.DEFAULT_TEMPLATE_CACHE_NAME.concat(tenantIdStr)));
+		compoundKeyCacheMap.put(tenantId, getCacheManagerByTenantId(tenantId).getCache(OpsCenterConstants.COMPOUND_KEY_CACHE_NAME.concat(tenantIdStr)));
+
+		accountSyncCacheMap.put(tenantId, getCacheManagerByTenantId(tenantId).getCache(OpsCenterConstants.ACCOUNT_SYNC_CACHE.concat(tenantIdStr)));
+		accountUserSyncCacheMap.put(tenantId, getCacheManagerByTenantId(tenantId).getCache(OpsCenterConstants.ACCOUNT_USER_SYNC_CACHE.concat(tenantIdStr)));
+
+		gsTstatCacheMap.put(tenantId, getCacheManagerByTenantId(tenantId).getCache(OpsCenterConstants.GRIDSTREAM_TSTAT_CACHE.concat(tenantIdStr)));
+
+		// R3.5 OTA caches
+		otaParamCacheMap.put(tenantId, getCacheManagerByTenantId(tenantId).getCache(OpsCenterConstants.OTA_PARAMETERS_CACHE.concat(tenantIdStr)));
+		deviceOtaCacheMap.put(tenantId, getCacheManagerByTenantId(tenantId).getCache(OpsCenterConstants.DEVICE_OTA_CACHE.concat(tenantIdStr)));
+		
+	}
+	
+	
+	/**
+	 * This is needed if ehcache is deployed in thirdparty, otherwise we get
+	 * ClassCastExceptions on redeploy
+	 */
+	public void clearAllCaches()
+	{
+		for( String tenantId : TenantPropertyUtil.tenantIdNameMap.keySet()){
+			String[] cacheNames = getCacheManagerByTenantId(Integer.valueOf(tenantId)).getCacheNames();
+	
+			logger.warn("Clearing all caches");
+			for (String cacheName : cacheNames)
+			{
+				Cache cache = getCacheManagerByTenantId(Integer.valueOf(tenantId)).getCache(cacheName);
+				cache.removeAll(true);
+			}
+		}
+	}
+
+	public void removeGatewayAndEsiData(Esi oldEsi)
+	{
+		int gatewayMqId = oldEsi.getEsiGatewayId().getGatewayMqId();
+		int esiMqId = oldEsi.getEsiMqId();
+		int accountId = oldEsi.getAccountId().getAccountId();
+		int esiId = oldEsi.getEsiId();
+
+		removeGatewayAndEsiData(gatewayMqId, esiMqId, accountId, esiId);
+	}
+
+	public void refreshGatewayAndEsiData(Esi esi)
+	{
+
+		int gatewayMqId = esi.getEsiGatewayId().getGatewayMqId();
+		int esiMqId = esi.getEsiMqId();
+		int accountId = esi.getAccountId().getAccountId();
+		int esiId = esi.getEsiId();
+		int networkDeliveryId = esi.getNetworkDeliveryId();
+
+		removeGatewayAndEsiData(gatewayMqId, esiMqId, accountId, esiId);
+		cacheEsiDeviceData((long) gatewayMqId, esiMqId, (long) esiId, networkDeliveryId);
+	}
+
+	/**
+	 * @param gatewayMqId
+	 * @param esiMqId
+	 * @param accountId
+	 * @param esiId
+	 */
+	private void removeGatewayAndEsiData(int gatewayMqId, int esiMqId, int accountId, int esiId)
+	{
+		String gwMqIdString = Integer.toString(gatewayMqId).intern();
+		logger.debug("removeGatewayAndEsiData(gatewayMqId=" + gatewayMqId + ", esiMqId=" + esiMqId + ", accountId=" + accountId + ", esiId=" + esiId + ")");
+		synchronized (gwMqIdString)
+		{
+			Results dcResults = getCacheDataByAccId(getGwDCCache(), accountId);
+			Results gsTstatResults = getCacheDataByAccId(getGsTstatCache(), accountId);
+			getGwEsiCache().remove(getCacheKey(esiMqId, gwMqIdString));
+
+			List<Result> dcList = dcResults.all();
+			for (Result result : dcList)
+			{
+				EsiDcCacheData esiDcCacheData = (EsiDcCacheData) result.getValue();
+				if (esiDcCacheData != null)
+				{
+					getGwDCCache().remove(esiDcCacheData.getCacheKey());
+				}
+			}
+
+			// DEV-1080
+			getGwEsiCache().remove(esiId + OpsCenterConstants.ESI_APPEND_STRING);
+
+			List<Result> tstatResultList = gsTstatResults.all();
+			for (Result result : tstatResultList)
+			{
+				GridStreamTstatCacheData tstatCacheData = (GridStreamTstatCacheData) result.getValue();
+				if (tstatCacheData != null)
+				{
+					getGsTstatCache().remove(tstatCacheData.getCacheKey());
+				}
+			}
+		}
+	}
+
+	public void cacheAccountSyncDataDuringInit()
+	{
+		logger.warn("Initializing AccountSync CACHE");
+		List<AccountSyncCacheData> accounts = userAccountBeanFacade.getAllAccountSyncData();
+		for (AccountSyncCacheData account : accounts)
+		{
+			Element e = new Element(account.getCacheKey(), account);
+			getAccountSyncCache().put(e, false);
+		}
+
+		List<AccountUserSyncCacheData> userList = userAccountBeanFacade.getAllAccountUserSyncData();
+		for (AccountUserSyncCacheData user : userList)
+		{
+			Element eu = new Element(user.getCacheKey(), user);
+			getAccountUserSyncCache().put(eu);
+		}
+		logger.warn("Finished Initializing AccountSync CACHE");
+	}
+
+	// KRMT-5172
+
+	public void cacheGatewayAndEsiDataDuringInit()
+	{
+		logger.warn("Initializing CACHE");
+		esiBeanFacade.cacheGatewayAndEsiDataDuringInit();
+		logger.warn("Finished Initializing CACHE");
+	}
+
+	// KRMT-5172 - IMPORTANT!! Changes that you wish to make to
+	// cacheGatewayAndEsiData() will
+	// need to also be made in esiBeanFacade.cacheGatewayAndEsiDataDuringInit().
+
+	public String cacheEsiDeviceData(Long gwId, int esiMqId, Long esiId, int networkDeliveryId)
+	{
+		String retValue = null;
+		if (networkDeliveryId != 2)
+		{
+			// see if reading already exists for this interval
+			String esiGW = gwId.toString().intern();
+			retValue = esiGW;
+			synchronized (esiGW)
+			{
+				 
+
+					// add GW first;
+					logger.debug("TESTING ONLY: Gateway cacheKey " + esiGW + " is not in cache, calling " + "esiBeanFacade.getEsiGatewayByGatewayMqId()");
+					Integer esiGwInt = Integer.parseInt(esiGW);
+					List<EsiGateway> esiGWList = esiBeanFacade.getEsiGatewayByGatewayMqId(esiGwInt);
+					if (esiGWList.isEmpty())
+					{
+						logger.error("GW MQ id not found in DB, id = " + gwId);
+						return null;
+					}
+					DateTime currTime = new DateTime();
+					EsiGateway esiGWObj = esiGWList.get(0);
+					EsiGatewayCacheData gwCache = new EsiGatewayCacheData();
+					gwCache.setGatewayMqId(esiGWObj.getGatewayMqId());
+					gwCache.setEsiGatewayId(esiGWObj.getEsiGatewayId());
+					// KRMT-5022
+					gwCache.setGatewayId(esiGWObj.getGatewayId().getGatewayId());
+					StringBuffer id = new StringBuffer();
+					id.append(esiGWObj.getGatewayMqId());
+					gwCache.setCacheKey(id.toString());
+					String gwkey = gwCache.getCacheKey();
+					gwCache.setDateCreated(esiGWObj.getDateCreated());
+					gwCache.setOutageFlag(esiGWObj.getOutageFlag());
+					gwCache.setDoNotManage(esiGWObj.getDoNotManageFlag());
+					Element gwElement = new Element(gwCache.getCacheKey(), gwCache);
+
+					// setup
+					Element newElement = null;
+					// no GW, which means no ESI data in cache, now add GW,
+					// meter,
+					// all esis, all DCs, all Tstats to cache
+					List<Esi> esiList = esiBeanFacade.getEsiByEsiGatewayId(esiGWObj.getEsiGatewayId());
+					if (esiList.isEmpty())
+					{
+						logger.error("ESI not found in for GW MQ id = " + esiGWObj.getGatewayMqId());
+						return gwkey;
+					}
+					List<CeGroupAccountMap> ceGrpAccList = controlEventBeanFacade.getCeGroupAccountMapByAccountId(esiList.get(0).getAccountId().getAccountId());
+					boolean grpAvail = true;
+					if (ceGrpAccList.isEmpty())
+					{
+						logger.error("ERROR -No GRPs assigned to this ESI, GRP id not stored in cache");
+						grpAvail = false;
+					}
+
+					boolean found = false;
+					int esiGWidx = 0;
+					int dbEsiId = 0;
+					EsiCacheData esiCache = null;
+					for (Esi esi : esiList)
+					{
+						// add all ESI for this GW into cache
+						esiCache = new EsiCacheData();
+						// TODO-CR KRMT-6479
+						/*
+						 * StringBuffer id1 = new StringBuffer();
+						 * id1.append(esi.
+						 * getEsiMqId()).append(gwCache.getCacheKey());
+						 * esiCache.setCacheKey(id1.toString());
+						 */
+						esiCache.setCacheKey(getCacheKey(esi.getEsiMqId(), gwCache.getCacheKey()));
+						esiGWidx = esi.getEsiGatewayId().getEsiGatewayId();
+						esiCache.setEsiGatewayId(esiGWidx);
+						esiCache.setEsiGatewayMQId(gwCache.getGatewayMqId());
+						esiCache.setEsiId(esi.getEsiId());
+						esiCache.setEsiMqId(esi.getEsiMqId());
+						esiCache.setEsiMode((byte) esi.getManageModeId().getGatewayMode());
+						esiCache.setNumOfAlerts(0xff);
+						esiCache.setGrpIdList(null);
+						esiCache.setActEnergyConsumed(0.0);
+						esiCache.setActEnergyAvail(0.0);
+						esiCache.setTimeZoneOlsonName(esi.getAccountId().getTimezoneId().getOlsonName());
+
+						if (esi.getAccountId().getAutoCeGroupId() != null)
+						{
+							esiCache.setAutoGroupId(esi.getAccountId().getAutoCeGroupId().getCeGroupId());
+						}
+						else
+						{
+							esiCache.setAutoGroupId(0);
+						}
+
+						esiCache.setAccountId(esi.getAccountId().getAccountId());
+						esiCache.setRoundRobinCnt(esi.getRoundRobinCount());
+						esiCache.setCeId(0);
+						esiCache.setLastMqRecdTime(currTime);
+						esiCache.setCeAccountMapId(0);
+						esiCache.setOptOutFlag(OpsCenterConstants.FALSE);
+						esiCache.setEnergyConsumedByDeviceType(new HashMap<String, Double>());
+						esiCache.setNwType(OpsCenterConstants.VERIZON_CELLULAR_DELIVERY);
+						esiCache.setDeliveryNetworkId(esi.getNetworkDeliveryId());
+						esiCache.setCeDeviceMqIds(null);
+
+						if (grpAvail)
+						{
+							List<Integer> grpIdList = new ArrayList<Integer>();
+							for (CeGroupAccountMap grpAcc : ceGrpAccList)
+							{
+								grpIdList.add(grpAcc.getCeGroupId().getCeGroupId());
+							}
+							esiCache.setGrpIdList(grpIdList);
+						}
+
+						newElement = new Element(esiCache.getCacheKey(), esiCache);
+						getGwEsiCache().put(newElement);
+					}
+
+					for (Esi esi : esiList)
+					{
+						if (esi.getEsiMqId() == esiMqId)
+						{
+							dbEsiId = esi.getEsiId();
+							found = true;
+							break;
+						}
+					}
+
+					if (!found)
+					{
+						logger.error("no ESI found for GWMqid = " + esiGW);
+						return gwkey;
+					}
+
+					// now add DC devices to gwDeviceCache
+					List<EsiDc> esiDcList = esiBeanFacade.getEsiDcByEsiId(dbEsiId);
+					if (esiDcList.isEmpty())
+					{
+						logger.debug(" No DCs assigned to this ESI = " + dbEsiId);
+					}
+
+					for (EsiDc esiDc : esiDcList)
+					{
+						if (OpsCenterConstants.TRUE.equals(esiDc.getDeleteFlag()))
+						{
+							continue;
+						}
+
+						addDcToCache(esiDc, esiDc.getEsiId(), esiGWObj, ceGrpAccList);
+
+					}
+
+					// now add tstat Devices
+					List<EsiTstat> esiTstatList = esiBeanFacade.getEsiTstatByEsiId(dbEsiId);
+					if (esiTstatList.isEmpty())
+					{
+						logger.debug(" No TSTATs assigned to this ESI = " + dbEsiId);
+					}
+					// go ahead and initialize the tstat drift map for this ESI
+					if (esiCache != null)
+					{
+						Element esiElement = new Element(esiCache.getCacheKey(), esiCache);
+						getGwEsiCache().put(esiElement);
+					}
+					logger.debug("All devices added to cache for  WMqId =  " + esiGW);
+ 				
+				logger.debug("TESTING ONLY: Found esiGW " + esiGW + " in cache, returning from cacheEsiDeviceData() with value of " + retValue);
+			}
+		}
+		else
+		{
+			// GridStream (NetworkDeliveryId == 2)
+
+			String gsEsiId = esiId.toString().intern();
+			if (!getGwEsiCache().isKeyInCache(esiId))
+			{
+				retValue = gsEsiId;
+				synchronized (gsEsiId)
+				{
+
+					// Add GridStream Tstat data to cache
+					List<TstatWallPlate> wallPlateList = deviceBeanFacade.getTstatWallPlateByEsiId(esiId.intValue());
+					if (wallPlateList.isEmpty())
+					{
+						logger.debug(" No GridStream TSTATs (Wallplate) assigned to this ESI = " + esiId);
+					}
+
+					for (TstatWallPlate wallPlate : wallPlateList)
+					{
+						if (wallPlate.getDeleteFlag() == OpsCenterConstants.TRUE)
+						{
+							continue;
+						}
+						cacheGSDeviceTstatData(wallPlate.getDeviceMacId());
+					}
+
+					// Add GridStream Lcs Relays data to cache
+					List<EsiDc> esiDcList = esiBeanFacade.getEsiDcByEsiId(esiId.intValue());
+					if (esiDcList.isEmpty())
+					{
+						logger.debug(" No DCs assigned to this ESI = " + esiId);
+					}
+
+					for (EsiDc esiDc : esiDcList)
+					{
+						if (OpsCenterConstants.TRUE.equals(esiDc.getDeleteFlag()))
+						{
+							continue;
+						}
+						if (esiDc.getDeviceMacId() != 0)
+						{
+							cacheGSDeviceDCData(esiDc.getDeviceMacId());
+						}
+					}
+
+				} // Synchronize
+			}
+		}
+		return retValue;
+	}
+
+	public void updateGSTstatRelays(EsiTstat esiTstat)
+	{
+		long deviceMacId = esiTstat.getDeviceMacId();
+		logger.debug("Entering updateGSTstatRelays deviceMacId =  " + deviceMacId);
+		if (deviceMacId == 0)
+		{
+			return;
+		}
+		String esiDev = Long.toString(deviceMacId).intern();
+		synchronized (esiDev)
+		{
+			Element e = getGsTstatCache().get(esiDev);
+			if (e != null)
+			{
+				GridStreamTstatCacheData tstatCache = (GridStreamTstatCacheData) e.getObjectValue();
+				Map<Integer, TstatRelayDescriptor> relays = tstatCache == null ? null : tstatCache.getRelays();
+				if (relays != null && tstatCache != null)
+				{
+					Set<TstatDcMap> tstatDcMapCollection = esiTstat.getTstatDcMapCollection();
+					if (tstatDcMapCollection != null && !tstatDcMapCollection.isEmpty())
+					{
+						TstatDcMap tstatDcMap = tstatDcMapCollection.iterator().next();
+						Dc dc = tstatDcMap.getEsiDcId().getDcId();
+
+						// Used relays
+						tstatCache.updateRelay(GridStreamMessagesGroupBean.W_RELAY_ID, dc.getMdWVoltage(), dc.getMdWMeasuredAmps());
+						tstatCache.updateRelay(GridStreamMessagesGroupBean.W2_RELAY_ID, dc.getMdW2Voltage(), dc.getMdW2MeasuredAmps());
+						tstatCache.updateRelay(GridStreamMessagesGroupBean.W3_RELAY_ID, dc.getMdW3Voltage(), dc.getMdW3MeasuredAmps());
+						tstatCache.updateRelay(GridStreamMessagesGroupBean.Y_RELAY_ID, dc.getMdYVoltage(), dc.getMdYMeasuredAmps());
+						tstatCache.updateRelay(GridStreamMessagesGroupBean.Y2_RELAY_ID, dc.getMdY2Voltage(), dc.getMdY2MeasuredAmps());
+						tstatCache.updateRelay(GridStreamMessagesGroupBean.G_RELAY_ID, dc.getMdGVoltage(), dc.getMdGMeasuredAmps());
+
+						getGsTstatCache().put(e);
+						logger.debug("Completed updateGSTstatRelays deviceMacId =  " + deviceMacId);
+					}
+					else
+					{
+						logger.debug("Skipped (no tsatDcMap) updateGSTstatRelays deviceMacId =  " + deviceMacId);
+					}
+				}
+				else
+				{
+					logger.debug("Skipped (no relays) updateGSTstatRelays deviceMacId =  " + deviceMacId);
+				}
+			}
+			else
+			{
+				logger.debug("Skipped (no cache element) updateGSTstatRelays deviceMacId =  " + deviceMacId);
+			}
+		}
+	}
+
+	/**
+	 * 
+	 * @param deviceId
+	 * @return false means still not in cache after this method
+	 */
+	public boolean cacheGSDeviceDCData(Long deviceId)
+	{
+
+		StringBuffer id1 = new StringBuffer();
+
+		String lcsCacheKey1 = id1.append(deviceId).append(OpsCenterConstants.LCS_RELAY_1).toString().intern();
+		synchronized (lcsCacheKey1)
+		{
+			String lcsCacheKey2 = deviceId.toString() + OpsCenterConstants.LCS_RELAY_2;
+			String lcsCacheKey3 = deviceId.toString() + OpsCenterConstants.LCS_RELAY_3;
+			String lcsCacheKey4 = deviceId.toString() + OpsCenterConstants.LCS_RELAY_4;
+
+			if (!getGwDCCache().isKeyInCache(lcsCacheKey1) && !getGwDCCache().isKeyInCache(lcsCacheKey2) 
+					&& !getGwDCCache().isKeyInCache(lcsCacheKey3) && !getGwDCCache().isKeyInCache(lcsCacheKey4))
+			{
+				// if we have not cached relay# 1, do it now as well as relay #2
+				// (if it exist)
+				// both relays always get cache at the same time
+				Long esiDev = deviceId;
+				if (esiDev == 0)
+				{
+					logger.warn("Device Mac Id is 0, will not cache");
+					return false;
+				}
+
+				List<EsiDc> esiDcList = esiBeanFacade.getEsiDcByDevMacId(esiDev);
+				Esi esi = null;
+				if (esiDcList.isEmpty())
+				{
+					logger.error("LCS devices not found in DB, LCSMacId = " + esiDev);
+					return false;
+				}
+				for (EsiDc esiDc : esiDcList)
+				{
+					Esi currentEsi = esiDc.getEsiId();
+					if (currentEsi == null)
+					{
+						logger.error("ESI not found in for device Identifier =  " + esiDc.getDeviceMacId());
+						return false;
+					}
+					if (esi == null)
+					{
+						esi = currentEsi;
+					}
+					else
+					{
+						if (esi.getEsiId() != currentEsi.getEsiId())
+						{
+							logger.error("Relays for the smae LCS have different ESIs, device Identifier =  " + esiDc.getDeviceMacId());
+							return false;
+						}
+					}
+				}
+				// cache either one or two relays now
+				List<CeGroupAccountMap> ceGrpAccList = controlEventBeanFacade.getCeGroupAccountMapByAccountId(esi.getAccountId().getAccountId());
+				if (ceGrpAccList.isEmpty())
+				{
+					logger.error("ERROR -No GRPs assigned to this ESI " + esi.getEsiId() + ", GRP id not stored in cache");
+				}
+				for (EsiDc esiDc : esiDcList)
+				{
+					addDcToCache(esiDc, esiDc.getEsiId(), esiDc.getDeviceMacId(), ceGrpAccList);
+				}
+			}
+		}
+		return true;
+	}
+
+	/**
+	 * @param esi
+	 * @param ceGrpAccList
+	 * @param currTime
+	 */
+	private void ensureEsiCacheExistsForLcs(Esi esi, List<CeGroupAccountMap> ceGrpAccList)
+	{
+		// Now lets check to see if the ESI For this device is in cache
+		// *any* device that is associated to this ESI can add the ESI
+		// into cache
+		// ***Note the esi Cache key is now just the primary key of the
+		// ESI table+ a special char ESI_APPEND_STRING
+
+		String esiKey = (new EsiCacheKeyBuilder()).getEsiKey(esi.getEsiId());
+
+		if (!getGwEsiCache().isKeyInCache(esiKey))
+		{
+			DateTime currTime = new DateTime();
+			// add all ESI for this DC into cache
+			EsiCacheData esiCache = new EsiCacheData();
+			esiCache.setCacheKey(esiKey);
+			int esiGWidx = esi.getEsiGatewayId().getEsiGatewayId();
+			esiCache.setEsiGatewayId(esiGWidx);
+			esiCache.setEsiId(esi.getEsiId());
+			esiCache.setEsiMqId(esi.getEsiMqId());
+			// ESI for GS is not used -- esi_dc/esi_tstat is where mode
+			// is
+			esiCache.setEsiMode(OpsCenterConstants.ESI_MODE_INACTIVE);
+			esiCache.setNumOfAlerts(0xff);
+			esiCache.setGrpIdList(null);
+			esiCache.setActEnergyConsumed(0.0);
+			esiCache.setActEnergyAvail(0.0);
+			esiCache.setTimeZoneOlsonName(esi.getAccountId().getTimezoneId().getOlsonName());
+			esiCache.setDutyCycle(0);
+
+			if (esi.getAccountId().getAutoCeGroupId() != null)
+			{
+				esiCache.setAutoGroupId(esi.getAccountId().getAutoCeGroupId().getCeGroupId());
+			}
+			else
+			{
+				esiCache.setAutoGroupId(0);
+			}
+
+			esiCache.setAccountId(esi.getAccountId().getAccountId());
+			esiCache.setRoundRobinCnt(esi.getRoundRobinCount());
+			esiCache.setCeId(0);
+			esiCache.setLastMqRecdTime(currTime);
+			esiCache.setBundlingPeriodicReadsFlag(OpsCenterConstants.FALSE);
+			esiCache.setCeAccountMapId(0);
+			esiCache.setOptOutFlag(OpsCenterConstants.FALSE);
+			esiCache.setEnergyConsumedByDeviceType(new HashMap<String, Double>());
+			esiCache.setNwType(OpsCenterConstants.GRIDSTREAM_RF_DELIVERY);
+			esiCache.setDeliveryNetworkId(esi.getNetworkDeliveryId());
+
+			if (!ceGrpAccList.isEmpty())
+			{
+				List<Integer> grpIdList = new ArrayList<Integer>();
+				for (CeGroupAccountMap grpAcc : ceGrpAccList)
+				{
+					grpIdList.add(grpAcc.getCeGroupId().getCeGroupId());
+				}
+				esiCache.setGrpIdList(grpIdList);
+			}
+			Element newElement = new Element(esiCache.getCacheKey(), esiCache);
+			getGwEsiCache().put(newElement);
+			logger.debug("Added EsiCacheData for GS dc, esiId= " + esiKey);
+			// TODO-- add call to GS RR method here
+			// missingReadsProcessing(esiCache, esi);
+
+		}
+	}
+
+	public void clearGSDeviceDCData(long deviceMacId)
+	{
+		String deviceId = Long.toString(deviceMacId);
+		String lcsCacheKey1 = deviceId + OpsCenterConstants.LCS_RELAY_1;
+		String lcsCacheKey2 = deviceId + OpsCenterConstants.LCS_RELAY_2;
+		String lcsCacheKey3 = deviceId + OpsCenterConstants.LCS_RELAY_3;
+		String lcsCacheKey4 = deviceId + OpsCenterConstants.LCS_RELAY_4;
+		logger.debug("Removed gwDCCache from cache lcsCacheKey1=" + lcsCacheKey1);
+		getGwDCCache().remove(lcsCacheKey1);
+		logger.debug("Removed gwDCCache from cache lcsCacheKey2=" + lcsCacheKey2);
+		getGwDCCache().remove(lcsCacheKey2);
+		logger.debug("Removed gwDCCache from cache lcsCacheKey3=" + lcsCacheKey3);
+		getGwDCCache().remove(lcsCacheKey3);
+		logger.debug("Removed gwDCCache from cache lcsCacheKey4=" + lcsCacheKey4);
+		getGwDCCache().remove(lcsCacheKey4);
+	}
+
+	public void clearGSDeviceTstatData(long deviceMacId)
+	{
+		String deviceId = Long.toString(deviceMacId);
+
+		getGsTstatCache().remove(deviceId);
+		logger.debug("Removed gsTstatCache from cache deviceId=" + deviceId);
+
+		getGwDCCache().remove(deviceId);
+		logger.debug("Removed gwDCCache from cache deviceId=" + deviceId);
+	}
+
+	public void clearGSDeviceTstatData(EsiTstat esiTstat)
+	{
+		Results tsatResults = getCacheDataByEsiTstatId(getGsTstatCache(), esiTstat.getEsiTstatId());
+		List<Result> tstatResultList = tsatResults.all();
+
+		// Only expecting one tstat
+		for (Result result : tstatResultList)
+		{
+			GridStreamTstatCacheData tstatCacheData = (GridStreamTstatCacheData) result.getValue();
+			if (tstatCacheData != null)
+			{
+				String deviceId = tstatCacheData.getCacheKey();
+
+				getGsTstatCache().remove(deviceId);
+				logger.debug("Removed gsTstatCache from cache deviceId=" + deviceId);
+
+				getGwDCCache().remove(deviceId);
+				logger.debug("Removed gwDCCache from cache deviceId=" + deviceId);
+			}
+		}
+
+		// No longer removing the esiCacheRecord here, b/c would need to do
+		// everything that
+		// GatewayConfigurationServiceSoapBindingImpl.removeGatewayAndOrElectricMeter
+		// does
+
+	}
+
+	public String cacheGSDeviceTstatData(Long deviceId)
+	{
+
+		// see if reading already exists for this interval
+		String esiDev = deviceId.toString().intern();
+		synchronized (esiDev)
+		{
+			if (!getGsTstatCache().isKeyInCache(esiDev))
+			{
+
+				// add GW first;
+				EsiTstat esiTstat = esiBeanFacade.getEsiTstatByDeviceMacId(deviceId);
+				if (esiTstat == null)
+				{
+					logger.error("GS Device id not found in DB, id = " + deviceId);
+					return null;
+				}
+
+				if (!cacheGsDeviceTstat(esiTstat))
+				{
+					return null;
+				}
+			}
+		}
+		return esiDev;
+	}
+
+	/**
+	 * @param esiTstatObj
+	 * @return
+	 */
+
+	public boolean cacheGsDeviceTstat(EsiTstat esiTstatObj)
+	{
+		int esiHvacDcId = getAndCacheHvacDcForTstat(esiTstatObj);
+
+		// Cache the DC that corresponds to this TSTAT
+		if (esiHvacDcId == 0)
+		{
+			logger.error("Could not cache DC for TSTAT , tstat deviceId = " + esiTstatObj.getDeviceMacId());
+			return false;
+		}
+		DateTime currTime = new DateTime();
+
+		// Now
+		GridStreamTstatCacheData tstatCache = new GridStreamTstatCacheData();
+		tstatCache.setDeviceMacId(esiTstatObj.getDeviceMacId());
+		String name = esiTstatObj.getEsiDcId().getDeviceTypeId().getDeviceTypeName();
+		tstatCache.setEsiTstatId(esiTstatObj.getEsiTstatId());
+		tstatCache.setEsiHvacDcId(esiHvacDcId);
+
+		tstatCache.setEsiDcId(esiTstatObj.getEsiDcId().getEsiDcId());
+		tstatCache.setTstatOverride(false);
+		tstatCache.setDrifting(false);
+		// needed for CE SP delta graph
+		tstatCache.setEsiDcTypeName(name);
+		String esiDev = Long.toString(esiTstatObj.getDeviceMacId());
+		tstatCache.setCacheKey(esiDev);
+		// must set the esi info in tstat cache in case the esi has already been
+		// added to cache from prev message
+		Esi esi = esiTstatObj.getEsiId();
+		if (esi == null)
+		{
+			logger.error("ESI not found in for device Identifier =  " + esiTstatObj.getDeviceMacId());
+			return false;
+		}
+		tstatCache.setAccountId(esi.getAccountId().getAccountId());
+		tstatCache.setEsiId(esi.getEsiId());
+		Element newElement = new Element(tstatCache.getCacheKey(), tstatCache);
+
+		logger.debug("Added TSTAT to cache for GS devices, key= " + tstatCache.getCacheKey());
+
+		getGsTstatCache().put(newElement);
+
+		// Now lets check to see if the ESI For this device is in cache
+		// *any* device that is associated to this ESI can add the ESI into
+		// cache
+		// ***Note the esi Cache key is now just the primary key of the ESI
+		// table
+
+		String id = (new EsiCacheKeyBuilder()).getEsiKey(esi.getEsiId());
+
+		if (!getGwEsiCache().isKeyInCache(id))
+		{
+
+			List<CeGroupAccountMap> ceGrpAccList = controlEventBeanFacade.getCeGroupAccountMapByAccountId(esi.getAccountId().getAccountId());
+			boolean grpAvail = true;
+			if (ceGrpAccList.isEmpty())
+			{
+				logger.error("ERROR -No GRPs assigned to this ESI, GRP id not stored in cache");
+				grpAvail = false;
+				return false;
+			}
+
+			// add all ESI for this DC into cache
+			EsiCacheData esiCache = new EsiCacheData();
+
+			esiCache.setCacheKey(id);
+			int esiGWidx = esi.getEsiGatewayId().getEsiGatewayId();
+			esiCache.setEsiGatewayId(esiGWidx);
+			esiCache.setEsiId(esi.getEsiId());
+			esiCache.setEsiMqId(esi.getEsiMqId());
+			// ESI for GS is not used -- esi_dc/esi_tstat is where mode is
+			esiCache.setEsiMode(OpsCenterConstants.ESI_MODE_INACTIVE);
+			esiCache.setNumOfAlerts(0xff);
+			esiCache.setGrpIdList(null);
+			esiCache.setActEnergyConsumed(0.0);
+			esiCache.setActEnergyAvail(0.0);
+			esiCache.setTimeZoneOlsonName(esi.getAccountId().getTimezoneId().getOlsonName());
+
+			if (esi.getAccountId().getAutoCeGroupId() != null)
+			{
+				esiCache.setAutoGroupId(esi.getAccountId().getAutoCeGroupId().getCeGroupId());
+			}
+			else
+			{
+				esiCache.setAutoGroupId(0);
+			}
+
+			esiCache.setAccountId(esi.getAccountId().getAccountId());
+			esiCache.setRoundRobinCnt(esi.getRoundRobinCount());
+			esiCache.setCeId(0);
+			esiCache.setLastMqRecdTime(currTime);
+			esiCache.setBundlingPeriodicReadsFlag(OpsCenterConstants.FALSE);
+			esiCache.setCeAccountMapId(0);
+			esiCache.setOptOutFlag(OpsCenterConstants.FALSE);
+			esiCache.setEnergyConsumedByDeviceType(new HashMap<String, Double>());
+			esiCache.setNwType(OpsCenterConstants.GRIDSTREAM_RF_DELIVERY);
+			esiCache.setDeliveryNetworkId(esi.getNetworkDeliveryId());
+
+			if (grpAvail)
+			{
+				List<Integer> grpIdList = new ArrayList<Integer>();
+				for (CeGroupAccountMap grpAcc : ceGrpAccList)
+				{
+					grpIdList.add(grpAcc.getCeGroupId().getCeGroupId());
+				}
+				esiCache.setGrpIdList(grpIdList);
+			}
+
+			Element esiElement = new Element(esiCache.getCacheKey(), esiCache);
+			getGwEsiCache().put(esiElement);
+			logger.debug("Added EsiId for GS Tstat, esiKey= " + id);
+		}
+		return true;
+	}
+
+	/**
+	 * @param esiDcId
+	 * @return
+	 */
+	private int getAndCacheHvacDcForTstat(EsiTstat esiTstat)
+	{
+		EsiDc esiDc = esiTstat.getEsiDcId();
+
+		if (esiDc == null)
+		{
+			logger.error("No valid hvac_dc found for esiTstatId = " + esiTstat.getEsiTstatId());
+			return 0;
+		}
+		logger.debug(" esiTstatId, found esi_dc, devtype = " + esiTstat.getEsiTstatId() + "/" + esiDc.getDeviceTypeId().getDeviceTypeName() + "/"
+				+ esiDc.getEsiDcId());
+
+		List<CeGroupAccountMap> ceGrpAccList = controlEventBeanFacade.getCeGroupAccountMapByAccountId(esiTstat.getEsiId().getAccountId().getAccountId());
+		if (ceGrpAccList.isEmpty())
+		{
+			logger.error("ERROR -No GRPs assigned to this ESI, GRP id not stored in cache");
+			return 0;
+		}
+		addDcToCache(esiDc, esiDc.getEsiId(), esiTstat.getDeviceMacId(), ceGrpAccList);
+
+		return esiDc.getEsiDcId();
+
+	}
+
+	/**
+	 * @param ceGroup
+	 * @param deviceTypeId
+	 * @return
+	 * @throws DatabaseUpdateFailed
+	 */
+	private CeGroupPower getCeGroupPower(CeGroup ceGroup, int deviceTypeId) throws DatabaseUpdateFailed
+	{
+		Set<CeGroupPower> ceGroupPowerCollection = ceGroup.getCeGroupPowerCollection();
+		CeGroupPower grpPower = null;
+		if (ceGroupPowerCollection != null)
+		{
+			for (CeGroupPower ceGroupPower : ceGroupPowerCollection)
+			{
+				if (ceGroupPower.getCeGroupId().getCeGroupId() == ceGroup.getCeGroupId() && ceGroupPower.getDeviceTypeId().getDeviceTypeId() == deviceTypeId)
+				{
+					grpPower = ceGroupPower;
+					break;
+				}
+			}
+		}
+		if (grpPower == null)
+		{
+			try
+			{
+				logger.info("Adding CE GrP Power to DB now for ceGroupId = " + ceGroup.getCeGroupId());
+
+				grpPower = controlEventBeanFacade.createCeGroupPowerInNewTransaction(ceGroup.getCeGroupId(), deviceTypeId);
+			} catch (Exception e)
+			{
+				// due to concurrent processing it is possible that the above
+				// CeGroupPower insert will violate the db unique constraint
+				// therefore check if the CeGroupPower object was inserted by a
+				// concurrent thread
+				grpPower = controlEventBeanFacade.getCeGroupPowerByCeGroupIdAndDeviceTypeId(ceGroup.getCeGroupId(), deviceTypeId);
+				logger.info("Adding -next try --CE GrP Power to DB now for ceGroupId = " + ceGroup.getCeGroupId());
+
+				if (grpPower != null)
+				{
+					logger.info("CeGroupPower record already exists for ceGroupId=" + ceGroup.getCeGroupId() + " & deviceTypeId=" + deviceTypeId);
+				}
+				else
+				{
+					throw new DatabaseUpdateFailed(DefaultResources.DB_ERR_CODE_UPDATE_FAILED, "DB Create failed for CeGroupPower ");
+				}
+			}
+			// this handles the case where there are multiple devices of that
+			// same type on the esi, (like 2 real hvacs & 2 fake hvacs)
+			controlEventBeanFacade.refreshCeGroup(ceGroup);
+		}
+		return grpPower;
+	}
+
+	public void updateDCCache(int oldDCMqId, int newEsiDc, int gwMqId) throws AbstractOpsCenterException
+	{
+
+		// setup
+		Element newElement = null;
+		Element oldElement = null;
+
+		// see if reading already exists for this interval
+		logger.debug("Old DC MQ id, before cache update " + oldDCMqId);
+		// CR KRMT-6479
+		String esiDcKey = getCacheKey(oldDCMqId, gwMqId);
+		if (getGwDCCache().isKeyInCache(esiDcKey))
+		{
+			oldElement = getGwDCCache().get(esiDcKey);
+			EsiDcCacheData esiDc = (EsiDcCacheData) oldElement.getObjectValue();
+			EsiDc newDC = esiBeanFacade.findEsiDcByEsiDcId(newEsiDc);
+			esiDc.setDeviceMqId(newDC.getDeviceMqId());
+			String name = newDC.getDeviceTypeId().getDeviceTypeName();
+			esiDc.setDeviceType(name);
+			esiDc.setVirtualFlag(newDC.getVirtualFlag().charAt(0));
+			String newKey = getCacheKey(newDC.getDeviceMqId(), gwMqId);
+			esiDc.setCacheKey(newKey);
+			newElement = new Element(esiDc.getCacheKey(), esiDc);
+			getGwDCCache().put(newElement);
+
+			logger.debug("Updated cache with new DC info, dcMqId = " + newDC.getDeviceMqId());
+		}
+		else
+		{
+			logger.error("Old DC not found in emCache--cache not updated");
+		}
+
+	}
+
+	private void addDcToCache(EsiDc esiDc, Esi esi, Object id, List<CeGroupAccountMap> ceGrpAccList)
+	{
+
+		String relayNo = esiDc.getRelayId();
+		EsiDcCacheData dcCache = new EsiDcCacheData();
+		dcCache.setDeviceMqId(esiDc.getDeviceMqId());
+		dcCache.setEsiDcId(esiDc.getEsiDcId());
+		dcCache.setAccountId(esi.getAccountId().getAccountId());
+		String devName = esiDc.getDeviceTypeId().getDeviceTypeName();
+		dcCache.setDeviceType(devName);
+		dcCache.setVirtualFlag(esiDc.getVirtualFlag().charAt(0));
+		dcCache.setDeviceName(esiDc.getName());
+		dcCache.setDeviceTypeId(esiDc.getDeviceTypeId().getDeviceTypeId());
+		StringBuffer id3 = new StringBuffer();
+		if (relayNo == null)
+		{
+			dcCache.setRelayNo(OpsCenterConstants.LCS_NO_RELAY);
+		}
+
+		if (id instanceof EsiGateway)
+		{
+			// CR KRMT-6479
+			EsiGateway esiGateway = (EsiGateway) id;
+			dcCache.setCacheKey(getCacheKey(esiDc.getDeviceMqId(), esiGateway.getGatewayMqId()));
+			dcCache.setDeviceMacId(0);
+			logger.debug("Added DC to cache for GW, mqid= " + esiDc.getDeviceMqId());
+		}
+		else if (id instanceof Long)
+		{
+			List<Integer> grpIdList = new ArrayList<Integer>();
+			id3.append(id);
+			// for GS RMM TSTAT cache we will rec a devMacId as a long
+			dcCache.setDeviceMacId((Long) id);
+			dcCache.setSendDrlcEnd(false);
+			if (relayNo != null)
+			{
+				dcCache.setRelayNo(Byte.parseByte(relayNo));
+				id3.append(relayNo);
+			}
+			dcCache.setCacheKey(id3.toString());
+			for (CeGroupAccountMap grpAcc : ceGrpAccList)
+			{
+				grpIdList.add(grpAcc.getCeGroupId().getCeGroupId());
+			}
+			dcCache.setGrpIdList(grpIdList);
+			logger.debug("Added GS DC to cache key = " + id3.toString());
+
+			ensureEsiCacheExistsForLcs(esi, ceGrpAccList);
+			
+			if (isNotEmpty(esiDc.getEsiTstatCollection()))
+			{
+				Optional<EsiTstat> esiTstatOptional = esiDc.getEsiTstatCollection().stream()
+						.filter(esiTstat -> esiTstat.getDeviceMacId() == dcCache.getDeviceMacId()).findFirst();
+				if (esiTstatOptional.isPresent())
+					dcCache.setAssetNo(esiTstatOptional.get().getTstatId().getAssetNo());
+			}
+		}		
+		dcCache.setReadingTime(new DateTime().getMillis());
+		dcCache.setActEnergyConsumed(0.0);
+		dcCache.setActEnergyAvail(0.0);
+		dcCache.setDcMode((byte) esiDc.getManageModeId().getGatewayMode());
+		dcCache.setEsiId(esi.getEsiId());
+		dcCache.setInvalidReadCount((byte) 0);
+		dcCache.setRoundRobinCnt(0);
+		dcCache.setOptOutFlag(OpsCenterConstants.FALSE);
+		dcCache.setCeId(0);
+		dcCache.setPingRequests(0);
+		dcCache.setPingResponses(0);
+		List<Integer> grpPwrIdList = new ArrayList<Integer>();
+		for (CeGroupAccountMap grpAcc : ceGrpAccList)
+		{
+			CeGroup ceGroup = grpAcc.getCeGroupId();
+			DeviceType deviceType = esiDc.getDeviceTypeId();
+			int deviceTypeId = deviceType.getDeviceTypeId();
+			CeGroupPower grpPower = null;
+			try
+			{
+				grpPower = getCeGroupPower(ceGroup, deviceTypeId);
+			} catch (DatabaseUpdateFailed e)
+			{
+				e.printStackTrace();
+			}
+
+			if (grpPower != null)
+			{
+				// add the GRP id to the DC cache
+				grpPwrIdList.add(grpPower.getCeGroupPowerId());
+			}
+		}
+		dcCache.setGrpPowerIdList(grpPwrIdList);
+		// add all DCs for this GW into cache
+		Element newElement = new Element(dcCache.getCacheKey(), dcCache);
+		getGwDCCache().put(newElement);
+
+	}
+
+	public void printGwDcCache()
+	{
+		logger.trace("Print GwDcCache");
+		for (Object key : getGwDCCache().getKeys())
+		{
+			Element element = getGwDCCache().get(key);
+			EsiDcCacheData esiDcCache = (EsiDcCacheData) element.getObjectValue();
+			logger.trace(esiDcCache.getEsiDcId() + " esiDcCache : " + esiDcCache);
+		}
+	}
+	
+	private void addTstatToCache(EsiTstat esiTstat, Esi esi, EsiGateway gw)
+	{
+
+		EsiTstatCacheData tstatCache = new EsiTstatCacheData();
+		tstatCache.setEsiId(esi.getEsiId());
+		tstatCache.setDeviceMqId(esiTstat.getDeviceMqId());
+		String name = esiTstat.getEsiDcId().getDeviceTypeId().getDeviceTypeName();
+		tstatCache.setEsiTstatId(esiTstat.getEsiTstatId());
+		tstatCache.setAccountId(esi.getAccountId().getAccountId());
+		tstatCache.setEsiDcId(esiTstat.getEsiDcId().getEsiDcId());
+		tstatCache.setTstatOverride(false);
+		tstatCache.setDrifting(false);
+		// needed for CE SP delta graph
+		tstatCache.setEsiDcTypeName(name);
+		// CR KRMT-6479
+		tstatCache.setCacheKey(getCacheKey(tstatCache.getDeviceMqId(), gw.getGatewayMqId()));
+		Element newElement = new Element(tstatCache.getCacheKey(), tstatCache);
+		getGwTstatCache().put(newElement);
+
+		logger.debug("Added TSTAT to cache for GW, esiId= " + esiTstat.getDeviceMqId());
+
+	}
+
+	public void addDCCache(int esiId, int esiDcId, int dcMqId, int gwMqId) throws AbstractOpsCenterException
+	{
+
+		// see if reading already exists for this interval
+		// TODO-CR KRMT-6479
+		/*
+		 * String gwId = Integer.toString(gwMqId); String esiDcKey =
+		 * Integer.toString(dcMqId).concat(gwId);
+		 */
+		String esiDcKey = getCacheKey(dcMqId, gwMqId);
+		if (!getGwDCCache().isKeyInCache(esiDcKey))
+		{
+			// passed in dcMqId does not exists for this GW, so go ahead
+			EsiDc newDC = esiBeanFacade.findEsiDcByEsiDcId(esiDcId);
+			Esi esi = esiBeanFacade.findEsiByEsiId(esiId);
+			EsiGateway esiGw = esi.getEsiGatewayId();
+			List<CeGroupAccountMap> ceGrpAccList = controlEventBeanFacade.getCeGroupAccountMapByAccountId(esi.getAccountId().getAccountId());
+			addDcToCache(newDC, esi, esiGw, ceGrpAccList);
+
+			logger.debug("Updated cache with new DC info, dcMqId = " + newDC.getDeviceMqId());
+		}
+		else
+		{
+			// KRMT- 3049 - If an EsiDC is editted in Ruby Provisioning then add
+			// will get called again even though the EsiDc is already cached in
+			// Ops
+			logger.warn("Received DC id already present in cache, ***WARNING***--cache not updated esiId=" + esiId + ", esiDcId=" + esiDcId + ", dcMqId="
+					+ dcMqId + ", gwMqId=" + gwMqId);
+		}
+	}
+	
+	public void addTstatCache(int esiId, int esiTstatId, int tstatMqId, int gwMqId) throws AbstractOpsCenterException
+	{
+
+		// see if reading already exists for this interval
+		// TODO-CR KRMT-6479
+		/*
+		 * String gwId = Integer.toString(gwMqId); String esiTstatKey =
+		 * Integer.toString(tstatMqId).concat(gwId);
+		 */
+		String esiTstatKey = getCacheKey(tstatMqId, gwMqId);
+		if (!getGwTstatCache().isKeyInCache(esiTstatKey))
+		{
+			EsiTstat newTstat = esiBeanFacade.findEsiTstatByEsiTstatId(esiTstatId);
+			Esi esi = esiBeanFacade.findEsiByEsiId(esiId);
+			EsiGateway esiGw = esi.getEsiGatewayId();
+			addTstatToCache(newTstat, esi, esiGw);
+
+			logger.debug("Updated cache with new TSTAT info, tstatMqId = " + newTstat.getDeviceMqId());
+
+		}
+		else
+		{
+			// KRMT- 3049 - If an Tstat is editted in Ruby Provisioning then add
+			// will get called again even though the Tstat is already cached in
+			// Ops
+			logger.warn("Received TSTAT id already present in cache, ***WARNING***--cache not updated esiId=" + esiId + ", esiTstatId=" + esiTstatId
+					+ ", tstatMqId=" + tstatMqId + ", gwMqId=" + gwMqId);
+		}
+	}
+
+
+	public void clearDCCache(int dcMqId, int gwMqId) throws AbstractOpsCenterException
+	{
+
+		logger.debug("DC MQ to clear from cache, before cache update " + dcMqId);
+		// TODO-CR KRMT-6479
+		/*
+		 * String gwId = new String(new Integer(gwMqId).toString()); String
+		 * esiDcKey = new String(new Integer(dcMqId).toString() .concat(gwId));
+		 */
+		String esiDcKey = getCacheKey(dcMqId, gwMqId);
+		if (getGwDCCache().isKeyInCache(esiDcKey))
+		{
+			getGwDCCache().remove(esiDcKey);
+
+			logger.debug("Removed DC MQ from cache " + dcMqId);
+		}
+		else
+		{
+			logger.error("Old DC not found in emCache--cache not updated");
+		}
+
+	}
+	
+	public void updateTstatCache(int oldTstatMqId, int newEsiTstat, int gwMqId) throws AbstractOpsCenterException
+	{
+
+		// setup
+		Element newElement = null;
+		Element oldElement = null;
+
+		// see if reading already exists for this interval
+
+		// CR KRMT-6479
+		logger.debug("Old Tstat MQ id, before cache update " + oldTstatMqId);
+		String esiTstatKey = getCacheKey(oldTstatMqId, gwMqId);
+		if (getGwTstatCache().isKeyInCache(esiTstatKey))
+		{
+			oldElement = getGwTstatCache().get(esiTstatKey);
+			EsiTstatCacheData esiTstat = (EsiTstatCacheData) oldElement.getObjectValue();
+			EsiTstat newTstat = esiBeanFacade.findEsiTstatByEsiTstatId(newEsiTstat);
+			String newKey = getCacheKey(newTstat.getDeviceMqId(), gwMqId);
+			esiTstat.setDeviceMqId(newTstat.getDeviceMqId());
+			esiTstat.setCacheKey(newKey);
+			newElement = new Element(newKey, esiTstat);
+			getGwTstatCache().put(newElement);
+
+			logger.debug("Updated cache with new Tstat info, tstatMqId = " + newTstat.getDeviceMqId());
+		}
+		else
+		{
+			logger.error("Old Tstat not found in tstatCache--cache not updated");
+		}
+
+	}
+
+	public void clearTstatCache(int tstatMqId, int gwMqId) throws AbstractOpsCenterException
+	{
+
+		// see if reading already exists for this interval
+
+		logger.debug(" Tstat MQ id clear from cache, before cache update  " + tstatMqId);
+		// TODO-CR KRMT-6479
+		/*
+		 * String gwId = new String(new Integer(gwMqId).toString()); String
+		 * esiTstatKey = new String(new Integer(tstatMqId).toString()
+		 * .concat(gwId));
+		 */
+		String esiTstatKey = getCacheKey(tstatMqId, gwMqId);
+		if (getGwTstatCache().isKeyInCache(esiTstatKey))
+		{
+
+			getGwTstatCache().remove(esiTstatKey);
+
+			logger.debug("Removed Tstat MQ from cache  " + tstatMqId);
+		}
+		else
+		{
+			logger.error("Old Tstat not found in tstatCache--cache not updated");
+		}
+
+	}
+
+	/*
+	 * (non-Javadoc)
+	 * 
+	 * @see com.consert.core.ejb.session.interfaces.CacheManagerBeanLocal#
+	 * updateDCReadingInCache(java.lang.String, double, int,
+	 * org.joda.time.DateTime, java.lang.String, org.joda.time.DateTime)
+	 */
+
+	public void updateDCReadingInCache(String devKey, double activeEnergy, int relayStatus, DateTime readingTime, EsiCacheData esiCache,
+			DateTime gwReadingTime, byte drlcMode) throws AbstractOpsCenterException
+	{
+
+		if (getGwDCCache().isKeyInCache(devKey))
+		{
+
+			Element element = getGwDCCache().get(devKey);
+			EsiDcCacheData esiDcCache = (EsiDcCacheData) element.getObjectValue();
+			if (activeEnergy != OpsCenterConstants.INVALID_READ && activeEnergy != OpsCenterConstants.PERSISTED_INVALID_METER_READ)
+			{
+				DateTime messageOutgoingDateTime = OpsCenterConstants.REALLY_LONG_AGO_DATETIME;
+				DateTime pushDateTimeGS = OpsCenterConstants.REALLY_LONG_AGO_DATETIME;
+				logger.debug("esiDcCache.getPgrmRequestTime(): " + esiDcCache.getPgrmRequestTime() + " for cacheKey " + esiDcCache.getCacheKey());
+				if (esiDcCache.getPgrmRequestTime() > 0)
+				{
+					messageOutgoingDateTime = new DateTime(esiDcCache.getPgrmRequestTime());
+					pushDateTimeGS = messageOutgoingDateTime.plusMinutes(OpsCenterConstants.PUSH_RESPONSE_MINUTES_GS);
+				}
+
+				// DEV-1622 Since there is a recent program push do not update
+				// the relay status from the reading until enough
+				// time has passed for the device to report the correct relay
+				// status for the reading.
+				if ((new DateTime()).getMillis() > pushDateTimeGS.getMillis())
+				{
+					esiDcCache.setRelayStatus(relayStatus);
+				}
+				esiDcCache.setInvalidReadCount((byte) 0);
+				// only add data into cache when a valid read is provided--no
+				// 0xffff allowed
+				// GW sends deciwatt hrs-- we must convert here to watts(*12)
+				activeEnergy = activeEnergy * OpsCenterConstants.multiplierForWattConversion;
+				esiDcCache.setReadingTime(readingTime.getMillis());
+				esiDcCache.setActEnergyConsumed(activeEnergy);
+				// power avail has already been set to 0 if device got added
+				// into CE, so don't compute it here
+				// if the ESI goes to normal, then we must accumulate powerAvail
+				// again
+				// power avail/consumed is tracked at the esiDc level for GS
+				// devices, so add additional check at the esiDc level
+
+				logger.debug(devKey + " getDcMode == " + esiDcCache.getDcMode() + "  relayStatus == " + relayStatus + "  getEsiMode == "
+						+ esiCache.getEsiMode());
+
+				if (!esiCache.getNwType().equals(OpsCenterConstants.GRIDSTREAM_RF_DELIVERY))
+				{
+					updateDcManageModeAndPower(relayStatus, esiCache, esiDcCache, activeEnergy);
+				}
+				else
+				{
+					updateGSDcManageModeAndPower(drlcMode, esiCache, esiDcCache, activeEnergy);
+				}
+
+				logger.info("DC readings updated for dcId/energyConsumed/energyAvail" + esiDcCache.getEsiDcId() + "/" + esiDcCache.getActEnergyConsumed() + "/"
+						+ esiDcCache.getActEnergyAvail());
+
+			}
+			else
+			{// invalid reads, clear power consumed
+				if (gwReadingTime.getMillis() > esiCache.getPgrmResponseTime())
+				{
+					esiDcCache.setRelayStatus(OpsCenterConstants.INVALID_STATE);
+				}
+				byte invalidReads = esiDcCache.getInvalidReadCount();
+				esiDcCache.setInvalidReadCount(++invalidReads);
+				esiDcCache.setActEnergyConsumed(0.0);
+				esiDcCache.setActEnergyAvail(0.0);
+				logger.info("Got invalid read, dcId/invalid read count = " + esiDcCache.getEsiDcId() + "/" + esiDcCache.getInvalidReadCount());
+			}
+
+			// now update far cache
+			// Done at end of reading code
+			// gwDCCache.put(element);
+
+		}
+		else
+		{
+			logger.error("DC not found in cache --could not update act energy for DC = " + devKey);
+		}
+	}
+
+	/**
+	 * @param relayStatus
+	 * @param esiCache
+	 * @param esiDcCache
+	 * @param activeEnergy
+	 */
+	private void updateDcManageModeAndPower(int relayStatus, EsiCacheData esiCache, EsiDcCacheData esiDcCache, double activeEnergy)
+	{
+		if (relayStatus == OpsCenterConstants.ESI_MODE_UNMANAGED)
+		{
+
+			esiDcCache.setDcMode(OpsCenterConstants.ESI_MODE_UNMANAGED);
+		}
+		else if (relayStatus == OpsCenterConstants.ESI_MODE_NORMAL && esiDcCache.getDcMode() == OpsCenterConstants.ESI_MODE_UNMANAGED)
+		{
+
+			logger.error("Glare condition, reading msg arrived with old mode, keeping old mode");
+		}
+		else if (esiCache.getEsiMode() == OpsCenterConstants.ESI_MODE_NORMAL || relayStatus == OpsCenterConstants.ESI_MODE_NORMAL)
+		{
+			esiDcCache.setDcMode(OpsCenterConstants.ESI_MODE_NORMAL);
+		}
+
+		if (esiCache.getEsiMode() == OpsCenterConstants.ESI_MODE_UNMANAGED)
+		{
+			esiDcCache.setDcMode(OpsCenterConstants.ESI_MODE_UNMANAGED);
+			esiCache.setOptOutReason(OpsCenterConstants.OptOutReason.DO_NOT_MANAGE);
+		}
+
+		if (esiDcCache.getDcMode() != OpsCenterConstants.ESI_MODE_CONTROL)
+		{
+			// If the whole ESI is opted out then there is no
+			// powerAvailable
+			if (!esiCache.getNwType().equals(OpsCenterConstants.GRIDSTREAM_RF_DELIVERY) && OpsCenterConstants.TRUE.equals(esiCache.getOptOutFlag())
+					|| esiDcCache.getDcMode() == OpsCenterConstants.ESI_MODE_UNMANAGED || esiCache.getEsiMode() == OpsCenterConstants.ESI_MODE_UNMANAGED)
+			{
+				esiDcCache.setActEnergyAvail(0.0);
+			}
+			else
+			{
+				esiDcCache.setActEnergyAvail(activeEnergy);
+			}
+		}
+	}
+
+	/**
+	 * @param relayStatus
+	 * @param esiCache
+	 * @param esiDcCache
+	 * @param activeEnergy
+	 */
+	private void updateGSDcManageModeAndPower(int relayStatus, EsiCacheData esiCache, EsiDcCacheData esiDcCache, double activeEnergy)
+	{
+		byte drlcMode = new Integer(relayStatus).byteValue();
+
+		boolean glareDnm = false;
+		// ignore stale read which may not have the correct mode after setting
+		// the DNM mode
+		if (esiDcCache.isFirstReadAfterDnmModeChange())
+		{
+			esiDcCache.setFirstReadAfterDnmModeChange(false);
+			logger.debug("handleFirstReadAfterDnmModeChange. Ignoring the cache mode" + " update since it is the first read after DNM mode has been updated."
+					+ " for " + esiDcCache.getDeviceMacId());
+			return;
+		}
+
+		// Fix a customer scenario of physical disconnects, where utility wants
+		// the ability to unmanage the device while it is powered off and would
+		// like powercenter retain the DNM state and sync up when the device
+		// comes back on i.e power off device, Activate DNM. There is an issue
+		// here when the device is turned back on after couple of minutes, hours
+		// or days, the device would send a normal read and would show the
+		// account in normal state. This is a special requirement where PC must
+		// remember the last action did by utility and sync that state with the
+		// device. So, with this fix we expect that when the utility user
+		// activates DNM since the cache has set it to unmanaged mode, now when
+		// a normal read arrives, it will resend the config request for
+		// unmanaged ref# KRMT-6876, 6975.
+		// A rare scenario but if we keep loosing the DEVICE CFG response and
+		// keep
+		// getting normal reads, we will keep sending the cfg messages and will
+		// get
+		// out of this condition only when the device sends a read with
+		// unmanaged mode.
+		if (esiDcCache.getDcMode() == OpsCenterConstants.ESI_MODE_UNMANAGED && OpsCenterConstants.ESI_MODE_NORMAL == drlcMode)
+		{
+			glareDnm = true;
+			logger.debug("We entered a glare condition on the DNM state, the cache has mode unmanaged while the read reports it normal,"
+					+ " send device cfg message to mark the device as unmanaged");
+			updateGSEsiDNMTrue(esiCache.getEsiId());
+			logger.debug("updateGSDcManageModeAndPower: glareDnm = " + glareDnm + " esiDcCache.getEsiDcId() " + esiDcCache.getEsiDcId()
+					+ " / esiDcCache.getDcMode() = " + esiDcCache.getDcMode() + " drlcMode = " + drlcMode);
+		}
+
+		logger.debug("updateGSDcManageModeAndPower:  esiCache.getEsiMode() = " + esiCache.getEsiMode() + "esiDcCache.getCeId()" + esiDcCache.getCeId()
+				+ "esiDcCache.getDeviceMacId()" + esiDcCache.getDeviceMacId());
+
+		// opt out if unmanaged
+		if (esiCache.getEsiMode() == OpsCenterConstants.ESI_MODE_UNMANAGED)
+		{
+			esiCache.setOptOutReason(OpsCenterConstants.OptOutReason.DO_NOT_MANAGE);
+			logger.debug("updateGSDcManageModeAndPower: Unmanaged opt out, dcId/manage mode = " + esiDcCache.getEsiDcId() + "/" + esiDcCache.getDcMode());
+		}
+		else if (drlcMode == OpsCenterConstants.ESI_MODE_UNMANAGED)
+		{
+			esiDcCache.setDcMode(OpsCenterConstants.ESI_MODE_UNMANAGED);
+		}
+		// HMBRD-887 Returning from DNM to Normal should set to mode to Normal
+		// Normal and control handling
+		else
+		{
+			// Update time received
+
+			// Is the device in a glare condition?
+			boolean glare = isGlare(drlcMode, esiCache, esiDcCache);
+
+			// Normal case - update the manage mode
+			if (!glare && !glareDnm)
+			{
+				// dev-2047 we cannot do an update on esiDC in the DB , since it
+				// causes perf issues
+				// current mode and prev mode is now updated as part of the
+				// readings processing
+				/*
+				 * int mode =
+				 * OpsCenterConstants.deviceModeToDBModeMap.get(drlcMode);
+				 * ManageMode manageModeId =
+				 * esiBeanFacade.getRefManageMode(mode); final List<EsiDc>
+				 * esiDcList = esiBeanFacade.getEsiDcByEsiDcId(esiDcCache
+				 * .getEsiDcId()); final EsiDc esiDc = esiDcList != null &&
+				 * !esiDcList.isEmpty() ? esiDcList.get(0) : null; //
+				 * EsiDcHistoryTable gets inserted automatically when updating
+				 * // EsiDc (b/c extends EsiAuditable) if (esiDc != null) {
+				 * esiDc.setPrevManageModeId(esiDc.getManageModeId());
+				 * esiDc.setManageModeId(manageModeId); }
+				 */
+				esiDcCache.setDcMode(drlcMode);
+				logger.debug("Glare not detected setting the esiDcCache.setDcMode as " + esiDcCache.getDcMode() + " for EsiDcId= " + esiDcCache.getEsiDcId());
+				// esiBeanFacade.updateEsiDcManageModes(esiDcCache.getEsiDcId(),
+				// manageModeId);
+
+			}
+
+			// If we are in a normal mode and not in glare,
+			// set the tstat opt out and drift flags to false (DEV-1607,
+			// DEV-1608).
+			if (drlcMode == OpsCenterConstants.ESI_MODE_NORMAL)
+			{
+				resetTstatCeFlags(esiDcCache);
+			}
+		}
+
+		// Set energy available if not under control
+		if (esiDcCache.getDcMode() != OpsCenterConstants.ESI_MODE_CONTROL && esiDcCache.getDcMode() != OpsCenterConstants.ESI_MODE_DM_CONTROL)
+		{
+			esiDcCache.setActEnergyAvail(activeEnergy);
+			logger.debug("Set active energy, dcId/energy = " + esiDcCache.getEsiDcId() + "/" + activeEnergy);
+		}
+	}
+
+	/**
+	 * Set the tstat opt out and drift flags to false (DEV-1607, DEV-1608)
+	 *
+	 * @param esiDcCache
+	 */
+	private void resetTstatCeFlags(EsiDcCacheData esiDcCache)
+	{
+		Results esiTstatIdResults = getCacheDataByEsiDcId(getGsTstatCache(), esiDcCache.getEsiDcId());
+		if (esiTstatIdResults != null)
+		{
+			for (Result tstatResult : esiTstatIdResults.all())
+			{
+				GridStreamTstatCacheData tstatCacheData = (GridStreamTstatCacheData) tstatResult.getValue();
+				if (tstatCacheData != null && tstatCacheData.getDeviceMacId() != 0)
+				{
+					// now find corresponding TSTAT
+					tstatCacheData.setTstatOverride(false);
+					tstatCacheData.setDrifting(false);
+					Element ele = new Element(tstatCacheData.getCacheKey(), tstatCacheData);
+					getGsTstatCache().put(ele);
+				}
+			}
+		}
+	}
+
+	/**
+	 * Is a device in a glare condition? This happens when a reading comes in
+	 * with a stale DRLC mode.
+	 *
+	 * @param drlcMode
+	 * @param esiCache
+	 * @param esiDcCache
+	 * @return
+	 */
+	private boolean isGlare(byte drlcMode, EsiCacheData esiCache, EsiDcCacheData esiDcCache)
+	{
+		boolean glare = false;
+
+		// Glare condition #1
+		// The device sends us normal mode but the device has already been
+		// placed in a CE
+		if (deviceInCeGlarePeriod(esiCache, esiDcCache))
+		{
+			logger.debug("isGlare #1(deviceInCeGlarePeriod): Device in glare Normal/Control - do not update for dc =  " + esiDcCache.getEsiDcId() + " mode = "
+					+ drlcMode);
+			glare = true;
+		}
+		// Glare condition #2
+		// The device sends us control mode but the device has already been
+		// taken out of a CE or device is in DM control
+		else if (drlcMode == OpsCenterConstants.ESI_MODE_CONTROL)
+		{
+			if (esiDcCache.getCeId() <= 0 || esiDcCache.getOptOutFlag().equals(OpsCenterConstants.TRUE) 
+					|| OpsCenterConstants.DM_EVENT_MESSAGE_START.equalsIgnoreCase(esiDcCache.getStrDMEventStatusFlag()))
+			{
+				logger.debug("isGlare #2(The device sends us control mode but the device has already been taken out of a CE): Device in glare Control/Normal - do not update for dc =  "
+						+ esiDcCache.getEsiDcId() + " mode = " + drlcMode);
+				glare = true;
+			}
+		}
+		// glare condition #3-- even if device is outside the glare window, and
+		// in CTRL it could still report
+		// mode = normal since it might have been unplugged and sent in a very
+		// late reading...way after ce started
+		// so return glare = true, so no mode change happens -dev2544
+
+		// added a check esiDcCache.getCeId()!=0 for cases when CE duration has
+		// elapsed
+		// and Device send normal read but DRLC ACK is lost,
+		// KRMT-6815
+		else if (esiDcCache.getDcMode() == OpsCenterConstants.ESI_MODE_CONTROL && drlcMode == OpsCenterConstants.ESI_MODE_NORMAL && esiDcCache.getCeId() != 0)
+		{
+			logger.debug("isGlare #3(CE is in progress and device sends normal read): Device in glare Normal/Control - do not update for dc =  "
+					+ esiDcCache.getEsiDcId() + " mode = " + drlcMode);
+			glare = true;
+		}
+		
+		// Glare condition #4 -- If the DM CE is started and the stale read lands with dc read as normal  
+		else if (esiDcCache.getDcMode() == OpsCenterConstants.ESI_MODE_DM_CONTROL && drlcMode == OpsCenterConstants.ESI_MODE_NORMAL)
+		{
+			logger.debug("isGlare #4(DM CE is in progress and device sends stale normal read): Device in glare Normal/DM Control - do not update for dc =  "
+					+ esiDcCache.getEsiDcId() + " mode = " + drlcMode);
+			glare = true;
+		}
+		
+		// Glare condition #5 -- If the DM CE has ended and the stale read lands with dc read as dm control, then ignore the dc mode.  
+		else if (esiDcCache.getDcMode() == OpsCenterConstants.ESI_MODE_NORMAL && drlcMode == OpsCenterConstants.ESI_MODE_DM_CONTROL)
+		{
+			logger.debug("isGlare #5(DM CE is has ended, so status is normal and device sends stale dm control read): Device in glare Normal/DM Control - do not update for dc =  "
+					+ esiDcCache.getEsiDcId() + " mode = " + drlcMode);
+			glare = true;
+		}
+
+		// Glare condition #6 -- If PC CE is started and the stale read lands with dc read as dm control  
+		else if (esiDcCache.getDcMode() == OpsCenterConstants.ESI_MODE_CONTROL && drlcMode == OpsCenterConstants.ESI_MODE_DM_CONTROL)
+		{
+			logger.debug("isGlare #6(PC CE is in progress and device sends stale DM Control read): Device in glare Normal/DM Control - do not update for dc =  "
+					+ esiDcCache.getEsiDcId() + " mode = " + drlcMode);
+			glare = true;
+		}
+
+		return glare;
+	}
+
+	public void updateTstatReadingInCache(String devKey, int setPoint, int roomTemp, String tstatMode, byte readingEsiMode, String esiKey, String tstatOver,
+			DateTime gwReadingTime) throws AbstractOpsCenterException
+	{
+
+		if (getGwTstatCache().isKeyInCache(devKey))
+		{
+			logger.info("Updated Tstat sp/rt in cache for Tstat id = = " + devKey);
+			DateTime currTime = new DateTime();
+			Element esiElement = getGwEsiCache().get(esiKey);
+			Element element = getGwTstatCache().get(devKey);
+			EsiTstatCacheData esiTstatCache = (EsiTstatCacheData) element.getObjectValue();
+			EsiCacheData esiCache = (EsiCacheData) esiElement.getObjectValue();
+			if (gwReadingTime.getMillis() > esiCache.getPgrmResponseTime())
+			{
+				esiTstatCache.setSetPoint(setPoint);
+				esiTstatCache.setRoomTemp(roomTemp);
+				esiTstatCache.setTstatMode(tstatMode);
+			}
+			esiTstatCache.setTstatOverride(OpsCenterConstants.TRUE.equals(tstatOver));
+
+			if (esiTstatCache.getEsiDcTypeName().equals(OpsCenterConstants.DC_HVAC))
+			{
+				// this condition occurs when the cooling & room temp >= target
+				// temp
+				// mark it as drift out so the task handler can replace power
+				// for this tstat
+				// only check drift if tstat is in control and cooling or
+				// heating (not OFF)
+				if (OpsCenterConstants.ESI_MODE_CONTROL == readingEsiMode)
+				{
+
+					// krmt-4311
+					// now lets only check for drift condition after 2nd
+					// periodic reading is received, once the
+					// ESI has been added to the event, otherwise we may drift
+					// out too early
+					// so get the CE start time for the ESI from cache
+					Results esiAccMapResults = getCacheDataByEsiId(getCeAccMapCache(), esiCache.getEsiId());
+					if (esiAccMapResults.size() > 0)
+					{
+						for (Result esiAccMapCacheResult : esiAccMapResults.all())
+						{
+							CEAccountMapCacheData esiAccMapCacheData = (CEAccountMapCacheData) esiAccMapCacheResult.getValue();
+							if (esiAccMapCacheData.getDutyCycle() > 0)
+							{
+								// if we are in a cycling event, ignore drift
+								// outs
+								logger.debug("ESI is in cycling evt, ignore drifting, esi = " + esiCache.getEsiId());
+								esiTstatCache.setDrifting(false);
+								break;
+							}
+							// now we must find the ceDevicesCache to see if
+							// this dev has already drifted.
+							DateTime ceStartTime = esiAccMapCacheData.getStartTime();
+							// only check drift after 2 read after esi gets
+							// added to evt (10 min)
+							logger.debug("Now determine werther to apply drift on this read for esiId= " + esiCache.getEsiId());
+							logger.debug("ce start time, curr time -10 min =  " + ceStartTime + " " + currTime.minusMinutes(10));
+
+							if (ceStartTime.getMillis() <= currTime.minusMinutes(10).getMillis())
+							{
+								if (tstatMode.equals(OpsCenterConstants.TSTAT_COOLING) && roomTemp >= setPoint)
+								{
+									esiTstatCache.setDrifting(true);
+								}
+								else if (tstatMode.equals(OpsCenterConstants.TSTAT_HEATING) && roomTemp <= setPoint)
+								{
+									esiTstatCache.setDrifting(true);
+								}
+
+							}
+						}
+					}
+					else
+					{
+						// if we get here, no ESI in CE ACC Map cache, so we may
+						// have opted out already.. thats ok, no need to check
+						// drift
+						esiTstatCache.setDrifting(false);
+						logger.debug("ESI not found in acc cache, must have exited event--esiId = " + esiCache.getEsiId());
+					}
+					// Once the tstat drifts keeping the state as drifting=true
+					// until the esi is out of control
+				}
+				else
+				{
+					// KRMT-3346
+					esiTstatCache.setDrifting(false);
+				}
+			}
+
+			logger.info("Tstat mode, overrideFlag, drifting from reading = " + esiTstatCache.getTstatMode() + " "
+					+ (esiTstatCache.getTstatOverride() ? OpsCenterConstants.TRUE : OpsCenterConstants.FALSE) + " "
+					+ (esiTstatCache.getDrifting() ? OpsCenterConstants.TRUE : OpsCenterConstants.FALSE));
+			getGwTstatCache().put(element);
+
+		}
+		else
+		{
+			logger.info("Tstat not found in cache --could not update sp/rm for Tstat = " + devKey);
+		}
+	}
+
+	public void updateGSTstatReadingInCache(String devKey, int setPoint, int roomTemp, String tstatMode, String esiKey, String tstatOver,
+			DateTime gwReadingTime, byte drlcMode) throws AbstractOpsCenterException
+	{
+
+		if (getGsTstatCache().isKeyInCache(devKey))
+		{
+
+			logger.info("Updated GS Tstat data = " + devKey);
+			Element element = getGsTstatCache().get(devKey);
+
+			GridStreamTstatCacheData tstatCache = (GridStreamTstatCacheData) element.getObjectValue();
+			if (tstatCache.getGwReadingTime() > gwReadingTime.getMillis())
+			{
+				// Don't cache old data
+				return;
+			}
+
+			DateTime currTime = new DateTime();
+			Element esiElement = getGwEsiCache().get(esiKey);
+
+			EsiCacheData esiCache = (EsiCacheData) esiElement.getObjectValue();
+			// why do we need this?-- taking out for now
+			// if (gwReadingTime.getMillis() >
+			// tstatCache.getPgrmResponseTime()){
+			tstatCache.setSetPoint(setPoint);
+
+			final double dutyCycleY = tstatCache.getDutyCycle(GridStreamMessagesGroupBean.Y_RELAY_ID);
+			final double dutyCycleY2 = tstatCache.getDutyCycle(GridStreamMessagesGroupBean.Y2_RELAY_ID);
+			final double dutyCycleW = tstatCache.getDutyCycle(GridStreamMessagesGroupBean.W_RELAY_ID);
+			final double dutyCycleW2 = tstatCache.getDutyCycle(GridStreamMessagesGroupBean.W2_RELAY_ID);
+			final double dutyCycleW3 = tstatCache.getDutyCycle(GridStreamMessagesGroupBean.W3_RELAY_ID);
+
+			final boolean compressorOn = dutyCycleY > 0 || dutyCycleY2 > 0 || dutyCycleW > 0 || dutyCycleW2 > 0 || dutyCycleW3 > 0;
+
+			final int prevRoomTemp = tstatCache.getPrevRoomTemp();
+			final boolean alert = compressorOn
+					&& ((roomTemp <= tstatCache.getPrevRoomTemp() && tstatMode.equals(OpsCenterConstants.TSTAT_HEATING)) || (roomTemp >= tstatCache
+							.getPrevRoomTemp() && tstatMode.equals(OpsCenterConstants.TSTAT_COOLING)));
+
+			if (prevRoomTemp <= 0)
+			{
+				// If prevRoomTemp is not valid then do not set or clear alarm.
+				// Also handles the 1st read after restart use case.
+				tstatCache.setHvacNotChangingTempCount(-1);
+			}
+			else if (alert)
+			{
+				logger.debug("Incrementing HvacNotChangingTempCount");
+				final int count = tstatCache.getHvacNotChangingTempCount();
+				if (count < Integer.MAX_VALUE)
+					tstatCache.setHvacNotChangingTempCount(count + 1);
+			}
+			else
+			{
+				logger.debug("Resetting HvacNotChangingTempCount");
+				tstatCache.setHvacNotChangingTempCount(0);
+			}
+			tstatCache.setPrevRoomTemp(tstatCache.getRoomTemp());
+			tstatCache.setRoomTemp(roomTemp);
+			tstatCache.setTstatMode(tstatMode);
+
+			// }
+
+			tstatCache.setGwReadingTime(gwReadingTime.getMillis());
+			tstatCache.setLastMqRecdTime(currTime);
+
+			if (tstatCache.getEsiDcTypeName().equals(OpsCenterConstants.DC_HVAC))
+			{
+				// this condition occurs when the cooling & room temp >= target
+				// temp
+				// mark it as drift out so the task handler can replace power
+				// for this tstat
+				// only check drift if tstat is in control and cooling or
+				// heating (not OFF)
+				if (OpsCenterConstants.ESI_MODE_CONTROL == drlcMode)
+				{
+
+					tstatCache.setDrifting(checkDrift(drlcMode, tstatMode, esiCache, roomTemp, setPoint, tstatCache));
+				}
+			}
+
+			logger.info("Tstat mode, overrideFlag, drifting from reading = " + tstatCache.getTstatMode() + " "
+					+ (tstatCache.getTstatOverride() ? OpsCenterConstants.TRUE : OpsCenterConstants.FALSE) + " "
+					+ (tstatCache.getDrifting() ? OpsCenterConstants.TRUE : OpsCenterConstants.FALSE));
+			getGwEsiCache().put(esiElement);
+			getGsTstatCache().put(element);
+
+		}
+		else
+		{
+			logger.info("Tstat not found in cache --could not update sp/rm for Tstat = " + devKey);
+		}
+	}
+
+	/*
+	 * This method determines if Drift out condition has been met. A result of
+	 * TRUE causes the setting of the drifting flag to true A result of FALSE
+	 * will clear the drifting flag
+	 */
+	boolean checkDrift(byte drlcMode, String tstatMode, EsiCacheData esiCache, int roomTemp, int setPoint, GridStreamTstatCacheData tstatCache)
+	{
+
+		// this condition occurs when in cooling mode or heating mode & room
+		// temp >= target temp
+		// or roomTemp <= setPoint respectively...
+		// mark it as drift out so the task handler can replace power for this
+		// tstat
+		// only check drift if tstat is in control and cooling or heating (not
+		// OFF)
+		boolean result = false;
+		DateTime currTime = new DateTime();
+
+		if (OpsCenterConstants.ESI_MODE_CONTROL == drlcMode)
+		{
+
+			// krmt-4311
+			// now lets only check for drift condition after 2nd periodic
+			// reading is received, once the
+			// ESI has been added to the event, otherwise we may drift out too
+			// early
+			// so get the CE start time for the ESI from cache
+			Results esiAccMapResults = getCacheDataByEsiId(getCeAccMapCache(), esiCache.getEsiId());
+			if (esiAccMapResults.size() > 0)
+			{
+				for (Result esiAccMapCacheResult : esiAccMapResults.all())
+				{
+					CEAccountMapCacheData esiAccMapCacheData = (CEAccountMapCacheData) esiAccMapCacheResult.getValue();
+
+					// If we are in a cycling CE, return false (DEV-1608)
+					Element ceElement = getControlEventCache().get(esiAccMapCacheData.getCeId());
+					if (ceElement != null)
+					{
+						ControlEventCacheData ceCache = (ControlEventCacheData) ceElement.getObjectValue();
+						if (OpsCenterConstants.eventMode.CYCLING == ceCache.getMode())
+						{
+							logger.debug("ESI is in cycling evt, ignore drifting, esi = " + esiCache.getEsiId() + " CE = " + esiAccMapCacheData.getCeId());
+							return false;
+						}
+					}
+
+					// now go and see if the ceDevicesCache has marked this guy
+					// as drifted
+					Results ceDevResults = getCacheDataByCeAccMapId(getCeDevCache(), esiAccMapCacheData.getCeAccMapId());
+					if (ceDevResults.size() > 0)
+					{
+						for (Result ceDev : ceDevResults.all())
+						{
+							CEDevicesCacheData localCeDevCache = (CEDevicesCacheData) ceDev.getValue();
+							// make sure its same esiDcId that is returned from
+							// list of ceDevicesCache
+							// hmbrd-813
+							if (localCeDevCache.getEsiDcId() == tstatCache.getEsiHvacDcId())
+							{
+								if (localCeDevCache != null && localCeDevCache.isHasDrifted())
+								{
+									// if this device has already drifted,
+									// exit-- we
+									// only want to drift once,
+									// but go ahead and clear the flag, and dont
+									// do
+									// any further drift processing
+									logger.debug("Dev has drifted, already, clear drifting flag now, esiDevId = " + localCeDevCache.getEsiDcId());
+									// exit now and return false no more drift
+									// processing needed...
+									return false;
+								}
+							}
+						}
+					}
+
+					if (esiAccMapCacheData.getDutyCycle() > 0)
+					{
+						// if we are in a cycling event, ignore drift outs
+						logger.debug("ESI is in cycling evt, ignore drifting, esi = " + esiCache.getEsiId());
+						result = false;
+						break;
+					}
+					DateTime ceStartTime = esiAccMapCacheData.getStartTime();
+					// only check drift after 2 read after esi gets
+					// added to evt (10 min)
+					logger.debug("Now determine werther to apply drift on this read for esiId= " + esiCache.getEsiId());
+					logger.debug("ce start time, curr time -10 min =  " + ceStartTime + " " + currTime.minusMinutes(10));
+
+					if (ceStartTime.getMillis() <= currTime.minusMinutes(10).getMillis())
+					{
+						if (tstatMode.equals(OpsCenterConstants.TSTAT_COOLING) && roomTemp >= setPoint)
+						{
+							result = true;
+						}
+						else if (tstatMode.equals(OpsCenterConstants.TSTAT_HEATING) && roomTemp <= setPoint)
+						{
+							result = true;
+						}
+
+					}
+				}
+			}
+			else
+			{
+				// if we get here, no ESI in CE ACC Map cache, so we may
+				// have opted out already.. thats ok, no need to check
+				// drift
+				result = false;
+				logger.warn("ESI not found in acc cache during drift check, must be staggering out = " + esiCache.getEsiId());
+			}
+			// Once the tstat drifts keeping the state as drifting=true
+			// until the esi is out of control
+		}
+
+		return result;
+	}
+
+	/**
+	 * @param devKey
+	 * @param setPoint
+	 * @param roomTemp
+	 * @param tstatMode
+	 * @param gwReadingTime
+	 * @throws AbstractOpsCenterException
+	 */
+
+	public void updateGSTstatReadingInCacheForProgramResponse(String devKey, int setPoint, int roomTemp, String tstatMode, long gwReadingTime)
+			throws AbstractOpsCenterException
+	{
+		logger.info("[ENTER] void CacheManagerBean.updateGSTstatReadingInCacheForProgramResponse(devKey = " + devKey + ", setPoint = " + setPoint
+				+ ", roomTemp = " + roomTemp + ", tstatMode = " + tstatMode + ", gwReadingTime = " + gwReadingTime + ")");
+
+		if (getGsTstatCache().isKeyInCache(devKey))
+		{
+			logger.info("Updated GS Tstat data = " + devKey);
+			Element element = getGsTstatCache().get(devKey);
+			GridStreamTstatCacheData tstatCache = (GridStreamTstatCacheData) element.getObjectValue();
+			if (tstatCache.getGwReadingTime() < gwReadingTime)
+			{
+
+				// DEV-1524 - convert SP and RT to F from CentiDegrees C Doubles
+				// to retain transition
+				// add .05 for precision accuracy for half degrees
+
+				setPoint = new Double(setPoint / 100.0 * 9.0 / 5.0 + 32.0 + 0.5).intValue(); // DEV-1524
+				tstatCache.setSetPoint(setPoint);
+				roomTemp = new Double(roomTemp / 100.0 * 9.0 / 5.0 + 32.0 + 0.5).intValue(); // DEV-1524
+				tstatCache.setRoomTemp(roomTemp);
+				tstatCache.setTstatMode(tstatMode);
+				// tstatCache.setGwReadingTime(gwReadingTime);
+				// tstatCache.setPgrmRequestTime(gwReadingTime);
+				// DEV-1524
+				tstatCache.setPgrmResponseTime(gwReadingTime);
+
+				getGsTstatCache().put(element);
+			}
+			logger.info("Tstat cache update = " + tstatCache.getTstatMode() + " " + tstatCache.getSetPoint());
+
+		}
+		else
+		{
+			logger.info("Tstat not found in cache --could not update sp/rm for Tstat = " + devKey);
+		}
+
+		logger.info("[ EXIT] CacheManagerBean.updateGSTstatReadingInCacheForProgramResponse");
+	}
+
+	public void updateESIPowerConsumed(EsiCacheData esiCache, List<EsiDcCacheData> dcCacheList, List<EsiTstatCacheData> tstatCacheList, DateTime readingTime,
+			DateTime gwReadingTime)
+	{
+
+		double actEnergyConsumed = 0.0;
+
+		logger.debug("esiCache ceId = " + esiCache.getCeId());
+
+		Map<String, Double> consumedByDeviceType = esiCache.getEnergyConsumedByDeviceType();
+		consumedByDeviceType.clear();
+		for (EsiDcCacheData esiDcCache : dcCacheList)
+		{
+
+			String deviceType = esiDcCache.getDeviceType();
+			Double consumed = consumedByDeviceType.get(deviceType);
+			double dcEnergyConsumed = esiDcCache.getActEnergyConsumed();
+			consumed = consumed == null ? dcEnergyConsumed : consumed + dcEnergyConsumed;
+			consumedByDeviceType.put(deviceType, consumed);
+
+			actEnergyConsumed += dcEnergyConsumed;
+			// once we get at least three invalid reads in a row set the ESI
+			// invalid read flag below
+			if (esiDcCache.getInvalidReadCount() >= OpsCenterConstants.CE_MAX_INVALID_READ_COUNT)
+			{
+				logger.debug("Got 3 Invalid Reads for dcId /EsiId =   " + esiDcCache.getEsiDcId() + "/" + esiCache.getEsiId());
+				// Don't want to risk the byte rolling to -128, but don't want
+				// to reset it to zero after 3 invalid reads either
+				esiDcCache.setInvalidReadCount((byte) OpsCenterConstants.CE_MAX_INVALID_READ_COUNT);
+			}
+		}
+		esiCache.setLastMqRecdTime(readingTime);
+		esiCache.setGwReadingTime(gwReadingTime.getMillis());
+		esiCache.setActEnergyConsumed(actEnergyConsumed);
+
+		handleControlEvent(esiCache, dcCacheList, tstatCacheList, actEnergyConsumed);
+
+		logger.debug("Updated power Consumed for ESI, EnergyConsumed = " + esiCache.getActEnergyConsumed() + ".  Esi mode in reading = "
+				+ esiCache.getEsiMode());
+	}
+
+	public void updateGSPowerConsumed(String esiKey, List<EsiDcCacheData> dcCacheList, List<GridStreamTstatCacheData> tstatCacheList, DateTime opsReadingTime,
+			DateTime devReadingTime)
+	{
+
+		double actEnergyConsumed = 0.0;
+
+		Element esiElement = getGwEsiCache().get(esiKey);
+		EsiCacheData esiCache = (EsiCacheData) esiElement.getObjectValue();
+		logger.debug("esiCache ceId = " + esiCache.getCeId());
+
+		Map<String, Double> consumedByDeviceType = esiCache.getEnergyConsumedByDeviceType();
+		consumedByDeviceType.clear();
+
+		String deviceType = null;
+		Double consumed = null;
+
+		for (EsiDcCacheData dcCache : dcCacheList)
+		{
+
+			// this must be the fake DC for the GS tstat
+			deviceType = dcCache.getDeviceType();
+			consumed = consumedByDeviceType.get(deviceType);
+			double dcEnergyConsumed = dcCache.getActEnergyConsumed();
+			consumed = consumed == null ? dcEnergyConsumed : consumed + dcEnergyConsumed;
+			consumedByDeviceType.put(deviceType, consumed);
+
+			actEnergyConsumed += dcEnergyConsumed;
+			// once we get at least three invalid reads in a row set the ESI
+			// invalid read flag below
+			if (dcCache.getInvalidReadCount() >= OpsCenterConstants.CE_MAX_INVALID_READ_COUNT)
+			{
+				logger.debug("Got 3 Invalid Reads for dcId /EsiId =   " + dcCache.getEsiDcId() + "/" + esiCache.getEsiId());
+				// Don't want to risk the byte rolling to -128, but don't want
+				// to reset it to zero after 3 invalid reads either
+				dcCache.setInvalidReadCount((byte) OpsCenterConstants.CE_MAX_INVALID_READ_COUNT);
+				//KRMT-7634 
+				Element element = new Element(dcCache.getCacheKey(), dcCache);
+				getGwDCCache().put(element);
+			}
+			// this must be done so task handler can add power to the groups
+			esiCache.setLastMqRecdTime(opsReadingTime);
+			esiCache.setActEnergyConsumed(esiCache.getActEnergyConsumed() + actEnergyConsumed);
+			esiCache.setActEnergyAvail(actEnergyConsumed);
+
+		}
+		// update ESI to build the consumedByDeviceType map
+		getGwEsiCache().put(esiElement);
+
+		handleGSControlEvent(esiCache, dcCacheList, tstatCacheList, actEnergyConsumed);
+
+		logger.debug("Updated power Consumed for GS Device, EnergyConsumed = " + consumed);
+	}
+
+	private void handleControlEvent(EsiCacheData esiCache, List<EsiDcCacheData> dcCacheList, List<EsiTstatCacheData> tstatCacheList, double actEnergyConsumed)
+	{
+		Map<Integer, EsiDcFlagCacheData> esiDcFlagByEsiDcId = esiCache.getCeFlagsByEsiDcId();
+		if (esiCache.getEsiMode() != OpsCenterConstants.ESI_MODE_CONTROL)
+		{
+			esiDcFlagByEsiDcId.clear();
+			// If the whole esi opts out of event A, then it cannot contribute
+			// power to another event until event A ends
+			// krmt-6543 clear the deviceClass attribute to ensure proper CE msg
+			// goes
+			// out next CE start
+			esiCache.setCeDeviceMqIds(null);
+
+			if (OpsCenterConstants.TRUE.equals(esiCache.getOptOutFlag()))
+			{
+				esiCache.setActEnergyAvail(0);
+			}
+			else
+			{
+				esiCache.setActEnergyAvail(actEnergyConsumed);
+			}
+			logger.debug("ESI is not in ctrl, actEnergy updated for esiId= " + esiCache.getEsiId());
+			return;
+		}
+
+		// Make sure esiDcFlagByEsiDcId is populated
+		for (EsiTstatCacheData tstatCache : tstatCacheList)
+		{
+			EsiDcFlagCacheData esiDcFlagCacheData = esiDcFlagByEsiDcId.get(tstatCache.getEsiDcId());
+			if (esiDcFlagCacheData == null)
+			{
+				esiDcFlagCacheData = new EsiDcFlagCacheData();
+				esiDcFlagCacheData.setEsiDcId(tstatCache.getEsiDcId());
+				esiDcFlagCacheData.setCeMqId(tstatCache.getDeviceMqId());
+				esiDcFlagByEsiDcId.put(esiDcFlagCacheData.getEsiDcId(), esiDcFlagCacheData);
+			}
+		}
+		for (EsiDcCacheData esiDcCache : dcCacheList)
+		{
+			EsiDcFlagCacheData esiDcFlagCacheData = esiDcFlagByEsiDcId.get(esiDcCache.getEsiDcId());
+			if (esiDcFlagCacheData == null)
+			{
+				esiDcFlagCacheData = new EsiDcFlagCacheData();
+				esiDcFlagCacheData.setEsiDcId(esiDcCache.getEsiDcId());
+				esiDcFlagCacheData.setCeMqId(esiDcCache.getDeviceMqId());
+				esiDcFlagByEsiDcId.put(esiDcFlagCacheData.getEsiDcId(), esiDcFlagCacheData);
+			}
+		}
+
+		// TODO test code remove for perf
+		// Get all the esi dc ids in CE
+		/*
+		 * Results results = getCacheDataByEsiDcId(getCeDevCache(),
+		 * esiDcFlagByEsiDcId.keySet()); for (Result result : results.all()) {
+		 * CEDevicesCacheData ceDevicesCacheData =
+		 * (CEDevicesCacheData)result.getValue(); if
+		 * (ceDevicesCacheData.getEndTime() == 0) {
+		 * esiDcIdsInCe.add(ceDevicesCacheData.getEsiDcId()); } }
+		 * results.discard();
+		 */
+
+		// Set the CE flags
+		for (EsiTstatCacheData tstatCache : tstatCacheList)
+		{
+			EsiDcFlagCacheData esiDcFlagCacheData = esiDcFlagByEsiDcId.get(tstatCache.getEsiDcId());
+			logger.debug("Checking for drift or override on esiId " + esiCache.getEsiId());
+			if (esiDcFlagCacheData != null)
+			{
+				if (esiDcFlagCacheData.getCeFlag() == 0)
+				{
+					if (tstatCache.getTstatOverride())
+					{
+						logger.debug("Tstat associated with esiDcId=" + esiDcFlagCacheData.getEsiDcId() + ", its setpoint was overriden.");
+						esiDcFlagCacheData.setCeFlag(OpsCenterConstants.CE_ESI_DC_FLAG_TSTAT_OVERRIDE);
+					}
+					else if (tstatCache.getDrifting())
+					{
+						logger.debug("Tstat associated with esiDcId=" + esiDcFlagCacheData.getEsiDcId() + ", has drifted.");
+						esiDcFlagCacheData.setCeFlag(OpsCenterConstants.CE_ESI_DC_FLAG_TSTAT_DRIFTING);
+					}
+				}
+			}
+		}
+
+		for (EsiDcCacheData esiDcCache : dcCacheList)
+		{
+			EsiDcFlagCacheData esiDcFlagCacheData = esiDcFlagByEsiDcId.get(esiDcCache.getEsiDcId());
+
+			if (esiDcFlagCacheData.getCeFlag() == 0)
+			{
+				if (esiDcCache.getInvalidReadCount() >= OpsCenterConstants.CE_MAX_INVALID_READ_COUNT)
+				{
+					logger.debug("Device associated with esiDcId=" + esiDcFlagCacheData.getEsiDcId() + ", had too many invalid reads.");
+					esiDcFlagCacheData.setCeFlag(OpsCenterConstants.CE_ESI_DC_FLAG_INVALID_READS);
+				}
+			}
+
+		}
+
+		esiCache.setCeFlagsByEsiDcId(esiDcFlagByEsiDcId);
+
+		// adding all esiDc for per to avoid cache lookup
+		Set<Integer> esiDcIdsInCe = new HashSet<Integer>();
+		Set<Integer> esiDcIdSet = esiDcFlagByEsiDcId.keySet();
+
+		for (Integer esiDc : esiDcIdSet)
+		{
+			esiDcIdsInCe.add(esiDc);
+		}
+		// Figure out which devices are still in control
+		List<Integer> ceDeviceMqIds = new ArrayList<Integer>();
+		boolean foundFlag = false;
+		for (Integer esiDcId : esiDcFlagByEsiDcId.keySet())
+		{
+			EsiDcFlagCacheData esiDcFlagCacheData = esiDcFlagByEsiDcId.get(esiDcId);
+
+			if (esiDcFlagCacheData.getCeFlag() == 0)
+			{
+				foundFlag = true;
+			}
+
+		}
+
+		// null means all mq ids are under control, so use device class
+		if (!foundFlag)
+		{
+			ceDeviceMqIds = null;
+		}
+
+		if (ceDeviceMqIds != null)
+		{
+			// Results results = getCacheDataByEsiDcId(getCeDevCache(),
+			// esiDcFlagByEsiDcId.keySet());
+			// for (Result result : results.all())
+			// {
+			// CEDevicesCacheData ceDevicesCacheData = (CEDevicesCacheData)
+			// result
+			// .getValue();
+			// if (ceDevicesCacheData.getEndTime() == 0)
+			// {
+			// esiDcIdsInCe.add(ceDevicesCacheData.getEsiDcId());
+			// }
+			// }
+			// results.discard();
+
+			List<Integer> ceActiveEsiDcIds = new ArrayList<Integer>();
+			if (esiCache.getCeId() > 0)
+			{
+				ceActiveEsiDcIds = getCEActiveEsiDcIdList(getCeDevCache());
+
+			}
+
+			for (Integer esiDc : esiDcFlagByEsiDcId.keySet())
+			{
+				if (ceActiveEsiDcIds.contains(esiDc))
+				{
+					esiDcIdsInCe.add(esiDc);
+				}
+
+			}
+
+			foundFlag = false;
+			ceDeviceMqIds.clear();
+
+			for (Integer esiDcId : esiDcFlagByEsiDcId.keySet())
+			{
+				EsiDcFlagCacheData esiDcFlagCacheData = esiDcFlagByEsiDcId.get(esiDcId);
+
+				if (esiDcFlagCacheData.getCeFlag() == 0)
+				{
+					if (esiDcIdsInCe.contains(esiDcFlagCacheData.getEsiDcId()))
+					{
+						ceDeviceMqIds.add(esiDcFlagCacheData.getCeMqId());
+					}
+				}
+				else
+				{
+					foundFlag = true;
+				}
+
+			}
+			if (!foundFlag)
+			{
+				ceDeviceMqIds = null;
+			}
+
+			if (ceDeviceMqIds != null && ceDeviceMqIds.isEmpty())
+			{
+				logger.debug("Opting out Esi b/c there are no non-opted out devices left for esi = " + esiCache.getEsiId());
+				// If there was an override and there are no devices left then
+				// opt out esi
+				// krmt 6152 set reason otherwise invalid read opt out throws
+				// npe
+				if (esiCache.getCeId() > 0)
+				{
+					esiCache.setOptOutReason(OpsCenterConstants.OptOutReason.ACCOUNT_OPTOUT);
+				}
+				ceDeviceMqIds = null;
+			}
+			else
+			{
+				logger.debug("Next heartbeat only includes these mqIds = " + ceDeviceMqIds);
+			}
+
+		}
+		esiCache.setCeDeviceMqIds(ceDeviceMqIds);
+
+		// If an individual device opts out, then it cannot contribute power to
+		// another event
+		double available = 0;
+		for (EsiDcCacheData esiDcCache : dcCacheList)
+		{
+			EsiDcFlagCacheData esiDcFlagCacheData = esiDcFlagByEsiDcId.get(esiDcCache.getEsiDcId());
+			if (esiDcFlagCacheData == null || esiDcFlagCacheData.getCeFlag() == 0)
+			{
+				available += esiDcCache.getActEnergyConsumed();
+			}
+		}
+		esiCache.setActEnergyAvail(available);
+	}
+
+	/*
+	 * this method considers GS tstat,GS LCS and "fake DC" power list to
+	 * determine how to calculate power for a CE
+	 */
+
+	public void handleGSControlEvent(EsiCacheData esiCache, EsiDcCacheData esiDc, GridStreamTstatCacheData tstatCache)
+	{
+
+		handleGSControlEvent(esiCache, Arrays.asList(esiDc), Arrays.asList(tstatCache), 0.0);
+	}
+
+	private void handleGSControlEvent(EsiCacheData esiCache, List<EsiDcCacheData> dcCacheList, List<GridStreamTstatCacheData> tstatCacheList,
+			double actEnergyConsumed)
+	{
+		Map<Integer, EsiDcFlagCacheData> esiDcFlagByEsiDcId = esiCache.getCeFlagsByEsiDcId();
+		byte drlcMode = 0;
+		if (dcCacheList != null && dcCacheList.size() > 0)
+		{
+			logger.debug("ENTER handleGSControlEvent " + dcCacheList.get(0).getDeviceMacId() + " " + dcCacheList.get(0).getDcMode());
+			drlcMode = dcCacheList.get(0).getDcMode();
+		}
+		else
+		{
+			logger.error("handleGSControlEvent : no DC Cache found");
+			return;
+		}
+
+		if (determineGlareReading(drlcMode, dcCacheList, esiCache, actEnergyConsumed))
+		{
+			logger.debug("handleGSControlEvent : glare reading found");
+			return;
+		}
+
+		// Make sure esiDcFlagByEsiDcId is populated
+		for (GridStreamTstatCacheData tstatCache : tstatCacheList)
+		{
+			// must use the hvacId of the dc which is in ctrl (rmm dc)
+			EsiDcFlagCacheData esiDcFlagCacheData = esiDcFlagByEsiDcId.get(tstatCache.getEsiDcId());
+			if (esiDcFlagCacheData == null)
+			{
+				esiDcFlagCacheData = new EsiDcFlagCacheData();
+				esiDcFlagCacheData.setEsiDcId(tstatCache.getEsiDcId());
+				logger.debug("Inserting GS tstat in hash for opt-out later proc " + tstatCache.getEsiDcId());
+
+				esiDcFlagByEsiDcId.put(esiDcFlagCacheData.getEsiDcId(), esiDcFlagCacheData);
+			}
+		}
+		// in GS we are always dev based, so a single DC is the current passed
+		// in device
+		EsiDcCacheData dcCache = dcCacheList.get(0);
+		for (EsiDcCacheData esiDcCache : dcCacheList)
+		{
+			EsiDcFlagCacheData esiDcFlagCacheData = esiDcFlagByEsiDcId.get(esiDcCache.getEsiDcId());
+			if (esiDcFlagCacheData == null)
+			{
+				esiDcFlagCacheData = new EsiDcFlagCacheData();
+				esiDcFlagCacheData.setEsiDcId(esiDcCache.getEsiDcId());
+				esiDcFlagCacheData.setCeMqId(esiDcCache.getDeviceMqId());
+				esiDcFlagByEsiDcId.put(esiDcFlagCacheData.getEsiDcId(), esiDcFlagCacheData);
+			}
+		}
+
+		// Get all the esi dc ids in CE
+		Set<Integer> esiDcIdsInCe = new HashSet<Integer>();
+		// Results results = getCacheDataByEsiDcId(getCeDevCache(),
+		// esiDcFlagByEsiDcId.keySet());
+		// for (Result result : results.all())
+		// {
+		// CEDevicesCacheData ceDevicesCacheData = (CEDevicesCacheData) result
+		// .getValue();
+		// if (ceDevicesCacheData.getEndTime() == 0)
+		// {
+		// esiDcIdsInCe.add(ceDevicesCacheData.getEsiDcId());
+		// }
+		// }
+
+		List<Integer> ceActiveEsiDcIds = new ArrayList<Integer>();
+		if (dcCache != null && dcCache.getCeId() > 0)
+		{
+			ceActiveEsiDcIds = getCEActiveEsiDcIdList(getCeDevCache());
+
+		}
+
+		for (Integer esiDc : esiDcFlagByEsiDcId.keySet())
+		{
+			if (ceActiveEsiDcIds.contains(esiDc))
+			{
+				esiDcIdsInCe.add(esiDc);
+			}
+
+		}
+
+		// Set the CE flags
+		EsiDcFlagCacheData esiDcFlagCacheData = null;
+		for (GridStreamTstatCacheData tstatCache : tstatCacheList)
+		{
+			esiDcFlagCacheData = esiDcFlagByEsiDcId.get(tstatCache.getEsiDcId());
+			logger.debug("Checking for drift or override on GS tstatEsiDcId" + tstatCache.getEsiId());
+			if (esiDcFlagCacheData != null)
+			{
+				if (esiDcFlagCacheData.getCeFlag() == 0)
+				{
+					if (tstatCache.getTstatOverride())
+					{
+						logger.debug("Tstat associated with esiDcId=" + esiDcFlagCacheData.getEsiDcId() + ", its setpoint was overriden.");
+						esiDcFlagCacheData.setCeFlag(OpsCenterConstants.CE_ESI_DC_FLAG_TSTAT_OVERRIDE);
+						handleTstatOverrideAndDrift(esiCache, esiDcFlagCacheData);
+					}
+					else if (tstatCache.getDrifting())
+					{
+						logger.debug("Tstat associated with esiDcId=" + esiDcFlagCacheData.getEsiDcId() + ", has drifted.");
+						esiDcFlagCacheData.setCeFlag(OpsCenterConstants.CE_ESI_DC_FLAG_TSTAT_DRIFTING);
+
+						handleTstatOverrideAndDrift(esiCache, esiDcFlagCacheData);
+					}
+
+				}
+			}
+		}
+
+		for (EsiDcCacheData esiDcCache : dcCacheList)
+		{
+			esiDcFlagCacheData = esiDcFlagByEsiDcId.get(esiDcCache.getEsiDcId());
+			if (esiDcIdsInCe.contains(esiDcFlagCacheData.getEsiDcId()) && esiDcFlagCacheData.getCeFlag() == 0)
+			{
+				if (esiDcCache.getInvalidReadCount() >= OpsCenterConstants.CE_MAX_INVALID_READ_COUNT)
+				{
+					logger.debug("Device associated with esiDcId=" + esiDcFlagCacheData.getEsiDcId() + ", had too many invalid reads.");
+					esiDcFlagCacheData.setCeFlag(OpsCenterConstants.CE_ESI_DC_FLAG_INVALID_READS);
+				}
+			}
+
+		}
+
+		esiCache.setCeFlagsByEsiDcId(esiDcFlagByEsiDcId);
+
+		logger.debug("Just set the esiFlags for esiId = " + esiCache.getEsiId());
+
+		// Figure out which devices are still in control
+		List<Long> ceDeviceMacIds = new ArrayList<Long>();
+		boolean foundFlag = false;
+		for (Integer esiDcId : esiDcFlagByEsiDcId.keySet())
+		{
+			esiDcFlagCacheData = esiDcFlagByEsiDcId.get(esiDcId);
+			logger.debug("esiDc flags esiDcId/flags = " + esiDcId + "/" + esiDcFlagCacheData.getCeFlag());
+
+			if (esiDcFlagCacheData.getCeFlag() == 0)
+			{
+				if (esiDcIdsInCe.contains(esiDcFlagCacheData.getEsiDcId()))
+				{
+					ceDeviceMacIds.add(esiDcFlagCacheData.getDevMacId());
+				}
+			}
+			else
+			{
+				foundFlag = true;
+			}
+		}
+
+		// hmbrd-592 no need to attempt to check for account_opt_out since each
+		// device for GS
+		// will get opted out upon processing of each reading/drlc response
+		// message-- account-opt-out not needed for GS
+		for (EsiDcCacheData esiDcCache : dcCacheList)
+		{
+			esiDcFlagCacheData = esiDcFlagByEsiDcId.get(esiDcCache.getEsiDcId());
+			if (esiDcFlagCacheData == null || esiDcFlagCacheData.getCeFlag() == 0)
+			{
+				esiDcCache.setActEnergyAvail(esiDcCache.getActEnergyConsumed());
+				Element element = new Element(esiDcCache.getCacheKey(), esiDcCache);
+				getGwDCCache().put(element);
+
+			}
+		}
+
+	}
+
+	private boolean determineGlareReading(byte drlcMode, List<EsiDcCacheData> dcCacheList, EsiCacheData esiCache, double actEnergyConsumed)
+	{
+
+		boolean result = false;
+		if (drlcMode != OpsCenterConstants.ESI_MODE_CONTROL && drlcMode != OpsCenterConstants.ESI_MODE_DM_CONTROL)
+		{
+
+			logger.debug("GS Dev is not in ctrl, see if opt-out  ");
+
+			result = true;
+			Map<Integer, EsiDcFlagCacheData> esiDcFlagByEsiDcId = esiCache.getCeFlagsByEsiDcId();
+			esiDcFlagByEsiDcId.clear();
+			// now check the fake (RMM) dc for the tstat
+			EsiDcCacheData dcCache = dcCacheList.get(0);
+			// If the whole esi opts out of event A, then it cannot contribute
+			// power to another event until event A ends
+			if (OpsCenterConstants.TRUE.equals(dcCache.getOptOutFlag()))
+			{
+				dcCache.setActEnergyAvail(0);
+				logger.debug("Power NOT AVAIL-- handleGSControl, dcid= " + dcCache.getEsiDcId());
+
+			}
+
+		}
+
+		return result;
+
+	}
+
+	/**
+	 * There is a period of one read where mode and other state data from the
+	 * device may not be accurate. This method determines if this device is in
+	 * this glare period.
+	 *
+	 * @param dcCache
+	 * @return
+	 */
+
+	public boolean deviceInCeGlarePeriod(EsiCacheData esiCache, EsiDcCacheData dcCache)
+	{
+		DateTime currTime = new DateTime();
+
+		boolean inGlare = false;
+		if (dcCache.getCeId() != 0)
+		{
+			Results ceDevCacheResults = getCacheDataByCeIdAndEsiDcId(getCeDevCache(), dcCache.getCeId(), dcCache.getEsiDcId());
+			if (ceDevCacheResults.size() > 0)
+			{
+				for (Result ceDevCacheResult : ceDevCacheResults.all())
+				{
+					CEDevicesCacheData ceDevCacheData = (CEDevicesCacheData) ceDevCacheResult.getValue();
+					if (ceDevCacheData == null)
+					{
+						continue;
+					}
+					int readingLatency = getReadingIntervalMin(esiCache.getDeliveryNetworkId());
+
+					DateTime ceStartTime = new DateTime(ceDevCacheData.getStartTime());
+					logger.debug("Now determine werther to ignore this read or not ");
+					logger.debug("ce start time + 5, curr time-- min =  " + ceStartTime.plusMinutes(readingLatency) + " " + currTime);
+
+					if (currTime.getMillis() <= ceStartTime.plusMinutes(readingLatency).getMillis())
+					{
+						// this dev is in a CE but did not respond
+						// with ctrl mode, we are in glare, ignore --no issue
+						inGlare = true;
+						logger.debug("glare,  ignore ");
+					}
+				}
+			}
+		}
+
+		return inGlare;
+	}
+
+	/**
+	 * @throws AbstractOpsCenterException
+	 */
+	public void updateCEGrpCache(Integer grpId, int deliveryNetworkId, double totalPower, double projPower, DateTime readingTime)
+			throws AbstractOpsCenterException
+	{
+
+		// setup
+		Element element = null;
+		CEGroupCacheData grpCache = null;
+		CeGroup grp = null;
+		DateTime currTime = new DateTime();
+		// see if reading already exists for this interval
+
+		if (!getCeGrpCache().isKeyInCache(grpId))
+		{
+			grp = controlEventBeanFacade.findCeGroupByCeGroupId(grpId);
+			if (grp == null)
+			{
+				logger.error("CE GRP not found in DB for id = " + grpId);
+				return;
+			}
+			grpCache = new CEGroupCacheData();
+			grpCache.setCeGrpId(grp.getCeGroupId());
+			grpCache.setName(grp.getName());
+			grpCache.setProjPowerAvailable(0.0);
+			grpCache.setProjPowerConsumed(0.0);
+			grpCache.setLastReadingTime(new DateTime().getMillis());
+			grpCache.setAutoGroupCreateFlag(grp.getAutoGroup());
+			grpCache.setAutoCeAdded(OpsCenterConstants.FALSE);
+			grpCache.setAutoGroupCreateTypeId(grp.getAutoGroupTypeId());
+			element = new Element(grpCache.getCeGrpId(), grpCache);
+			getCeGrpCache().put(element);
+		}
+		else
+		{
+
+			logger.debug("CE Grp already in cache updating, requested read time = " + readingTime);
+			// found already in cache just update the data in the element
+			element = getCeGrpCache().get(grpId);
+			grpCache = (CEGroupCacheData) element.getObjectValue();
+		}
+		DateTime temp1 = readingTime.withSecondOfMinute(0);
+		DateTime readingMinutes = temp1.withMillisOfSecond(0);
+		DateTime temp2 = currTime.withSecondOfMinute(0);
+		DateTime currMinutes = temp2.withMillisOfSecond(0);
+		// only increment energy values if the reading time of ESI is inside of
+
+		// Stale time minutes: minutes-- this means ESI has not reported, dont
+		// consider its power
+		int readingLatency = getReadingIntervalMin(deliveryNetworkId);
+		if (readingMinutes.getMillis() >= currMinutes.minusMinutes(readingLatency).getMillis())
+		{
+
+			grpCache.setProjPowerConsumed(grpCache.getProjPowerConsumed() + totalPower);
+			grpCache.setProjPowerAvailable(grpCache.getProjPowerAvailable() + projPower);
+		}
+		// The far cache is updated only once per iteration of the
+		// ControlEventPowerTaskSchedular
+		// ceGrpCache.put(element);
+
+		logger.debug("Exiting  updateCEGrpCache-- cache updated with totalPowerConsumed = " + grpCache.getProjPowerConsumed());
+	}
+
+	public void addCEGrpCache(Integer grpId, double totalPowerAvail, double projPowerConsumed)
+	{
+
+		// setup
+		Element element = null;
+		CEGroupCacheData grpCache = null;
+		CeGroup grp = null;
+		// DateTime currTime = new DateTime();
+		// see if reading already exists for this interval
+
+		if (!getCeGrpCache().isKeyInCache(grpId))
+		{
+			grp = controlEventBeanFacade.findCeGroupByCeGroupId(grpId);
+			if (grp == null)
+			{
+				logger.error("CE GRP not found in DB for id = " + grpId);
+				return;
+			}
+			if (OpsCenterConstants.TRUE.equals(grp.getDeleteFlag()))
+			{
+				// this grp has been deleted, do not add it to cache
+				return;
+			}
+
+			grpCache = new CEGroupCacheData();
+			grpCache.setCeGrpId(grp.getCeGroupId());
+			grpCache.setName(grp.getName());
+			grpCache.setProjPowerAvailable(0.0);
+			grpCache.setProjPowerConsumed(0.0);
+			grpCache.setLastReadingTime(new DateTime().getMillis());
+			grpCache.setAutoGroupCreateFlag(grp.getAutoGroup());
+			grpCache.setAutoGroupCreateTypeId(grp.getAutoGroupTypeId());
+			grpCache.setCeStartTime(0);
+			grpCache.setCeTotalMinutes(0);
+			grpCache.setCeId(0);
+			grpCache.setAutoCeAdded(OpsCenterConstants.FALSE);
+			grpCache.setCeTotalMinsCalculated(false);
+			element = new Element(grpCache.getCeGrpId(), grpCache);
+			getCeGrpCache().put(element);
+		}
+		else
+		{
+			// found already in cache just update the data in the element
+			element = getCeGrpCache().get(grpId);
+			grpCache = (CEGroupCacheData) element.getObjectValue();
+		}
+
+		grpCache.setProjPowerConsumed(projPowerConsumed);
+		grpCache.setProjPowerAvailable(totalPowerAvail);
+		getCeGrpCache().put(element);
+	}
+
+	public void updateCEGrpCache(Integer grpId, boolean add, EsiCacheData esiCache) throws AbstractOpsCenterException, InterruptedException
+	{
+
+		/*
+		 * 1) Remove power from CEGroupCacheData 2) Remove grpId from
+		 * EsiCacheData.grpIdList 3) Remove power from CEGroupPowerCacheData 4)
+		 * Remove ceGroupPowerId from EsiDcCacheData.grpPowerIdList
+		 */
+
+		double totalPower = esiCache.getActEnergyConsumed();
+		double projPower = esiCache.getActEnergyAvail();
+		if (!add)
+		{
+			totalPower = -totalPower;
+			projPower = -projPower;
+		}
+
+		DateTime readingTime = esiCache.getLastMqRecdTime();
+
+		// setup
+		Element element = null;
+		CEGroupCacheData grpCache = null;
+		CeGroup grp = controlEventBeanFacade.findCeGroupByCeGroupId(grpId);
+
+		// see if reading already exists for this interval
+
+		if (!getCeGrpCache().isKeyInCache(grpId))
+		{
+			if (grp == null)
+			{
+				logger.error("CE GRP not found in DB for id = " + grpId);
+				return;
+			}
+			grpCache = new CEGroupCacheData();
+			grpCache.setCeGrpId(grp.getCeGroupId());
+			grpCache.setName(grp.getName());
+			grpCache.setAutoGroupCreateFlag(grp.getAutoGroup());
+			grpCache.setAutoGroupCreateTypeId(grp.getAutoGroupTypeId());
+			grpCache.setProjPowerAvailable(0.0);
+			grpCache.setAutoCeAdded(OpsCenterConstants.FALSE);
+			if (add)
+			{
+				grpCache.setProjPowerConsumed(totalPower);
+			}
+			else if (grpCache.getProjPowerConsumed() - totalPower < 0)
+			{
+				grpCache.setProjPowerConsumed(0.0);
+			}
+			else
+			{
+				grpCache.setProjPowerConsumed(totalPower);
+			}
+			grpCache.setLastReadingTime(new DateTime().getMillis());
+			element = new Element(grpCache.getCeGrpId(), grpCache);
+			// ceGrpCache.put(element);
+		}
+		else
+		{
+
+			logger.debug("CE Grp already in cache updating, requested read time = " + readingTime);
+			// found already in cache just update the data in the element
+			element = getCeGrpCache().get(grpId);
+			grpCache = (CEGroupCacheData) element.getObjectValue();
+		}
+
+		DateTime currTime = new DateTime();
+		// DateTime currTime = new
+		// DateTime().withTime(readingTime.getHourOfDay(),
+		// readingTime.getMinuteOfHour(), 0, 0);
+		// DateTime readingMinutes =
+		// readingTime.withTime(readingTime.getHourOfDay(),
+		// readingTime.getMinuteOfHour(), 0, 0);
+
+		// use 5 minutes for boundary values for last reads--
+		// only increment when inside of 5 minutes
+		double projPowerConsumed = grpCache.getProjPowerConsumed();
+
+		logger.debug("Esi Consumed=" + totalPower + " Available=" + projPower + " before update grpCache Consumed=" + grpCache.getProjPowerConsumed()
+				+ " Available=" + grpCache.getProjPowerAvailable());
+		if (readingTime.getMillis() >= currTime.minusMinutes(5).getMillis())
+		{
+			// readings are for last stale time min so go ahead and increment
+			// do not allow group data to go negative
+			if (grpCache.getProjPowerConsumed() + totalPower < 0.0)
+			{
+				grpCache.setProjPowerConsumed(0.0);
+				grpCache.setProjPowerAvailable(0.0);
+			}
+			else
+			{
+				grpCache.setProjPowerConsumed(projPowerConsumed + totalPower);
+				grpCache.setProjPowerAvailable(grpCache.getProjPowerAvailable() + projPower);
+			}
+
+			logger.debug("After update grpCache Consumed=" + grpCache.getProjPowerConsumed() + " Available=" + grpCache.getProjPowerAvailable());
+
+		}
+		if (add)
+		{
+			getCeGrpCache().put(element);
+		}
+		else
+		{
+			getCeGrpCache().remove(element);
+		}
+
+		List<Integer> grpIdList = new ArrayList<Integer>(esiCache.getGrpIdList());
+
+		logger.debug("Before add/remove " + grpId + " esiCacheData.grpIdList=" + grpIdList);
+
+		if (add)
+		{
+			if (!grpIdList.contains(grpId))
+			{
+				grpIdList.add(grpId);
+			}
+		}
+		else
+		{
+			grpIdList.remove(grpId);
+		}
+
+		logger.debug("After esiCacheData.grpIdList=" + grpIdList);
+
+		esiCache.setGrpIdList(grpIdList);
+
+		Results dcResults = getCacheDataByEsiId(getGwDCCache(), esiCache.getEsiId());
+		List<Result> results = dcResults.all();
+		for (Result result : results)
+		{
+			EsiDcCacheData esiDcCacheData = (EsiDcCacheData) result.getValue();
+			List<Integer> grpPwrIdList = new ArrayList<Integer>(esiDcCacheData.getGrpPowerIdList());
+
+			logger.debug("Before esiDcCacheData.grpPwrIdList=" + grpPwrIdList);
+
+			Integer deviceTypeId = OpsCenterConstants.deviceNameToTypeMap.get(esiDcCacheData.getDeviceType());
+			if (deviceTypeId != null)
+			{
+				CeGroupPower grpPower = getCeGroupPower(grp, deviceTypeId.intValue());
+				Integer ceGroupPowerId = grpPower.getCeGroupPowerId();
+				boolean modified = false;
+				if (add)
+				{
+					if (!grpPwrIdList.contains(ceGroupPowerId))
+					{
+						modified = grpPwrIdList.add(ceGroupPowerId);
+					}
+					updateCEGrpPowerCache(ceGroupPowerId, esiCache.getDeliveryNetworkId(), esiDcCacheData.getDeviceType(), esiDcCacheData.getActEnergyAvail(),
+							esiDcCacheData.getActEnergyConsumed(), esiDcCacheData.getReadingTime());
+				}
+				else
+				{
+					modified = grpPwrIdList.remove(ceGroupPowerId);
+					updateCEGrpPowerCache(ceGroupPowerId, esiCache.getDeliveryNetworkId(), esiDcCacheData.getDeviceType(), -esiDcCacheData.getActEnergyAvail(),
+							-esiDcCacheData.getActEnergyConsumed(), esiDcCacheData.getReadingTime());
+				}
+				if (modified)
+				{
+					esiDcCacheData.setGrpPowerIdList(grpPwrIdList);
+					Element esiDcElement = new Element(esiDcCacheData.getCacheKey(), esiDcCacheData);
+					getGwDCCache().put(esiDcElement);
+				}
+			}
+
+			esiDcCacheData.setGrpIdList(grpIdList);
+			//KRMT-7634 
+			Element esiDcElement = new Element(esiDcCacheData.getCacheKey(), esiDcCacheData);
+			getGwDCCache().put(esiDcElement);
+			
+			logger.debug("After esiDcCacheData.grpPwrIdList=" + grpPwrIdList);
+		}
+
+	}
+
+	public void updateControlEventCache(ControlEvent updateCe) throws AbstractOpsCenterException
+	{
+
+		// setup
+		Element element = null;
+		ControlEventCacheData ceCache = null;
+		ControlEvent ce = null;
+		int ceKey = updateCe.getControlEventId();
+		// see if reading already exists for this interval
+		if (!getControlEventCache().isKeyInCache(ceKey))
+		{
+			ce = controlEventBeanFacade.findControlEventByControlEventId(updateCe.getControlEventId());
+			if (ce == null)
+			{
+				logger.error("Control Event not found in DB for id = " + updateCe.getControlEventId());
+				return;
+			}
+
+			ceCache = new ControlEventCacheData();
+			ceCache.setCeId(ceKey);
+			element = new Element(ceCache.getCeId(), ceCache);
+		}
+		else
+		{
+			// found already in cache just update the data in the element
+			element = getControlEventCache().get(ceKey);
+			ceCache = (ControlEventCacheData) element.getObjectValue();
+		}
+
+		ceCache.setCeStatus(updateCe.getCeStatusId().getCeStatusName());
+		ceCache.setAdditionalPowerToRemove(updateCe.getAdditionalPowerToRemove());
+		ceCache.setCriticalFlag(updateCe.getCriticalFlag());
+		ceCache.setIncludeHvacFlag(updateCe.getIncludeHvacFlag());
+		ceCache.setIncludePPFlag(updateCe.getIncludePoolPumpFlag());
+		ceCache.setIncludeWHFlag(updateCe.getIncludeWaterHeaterFlag());
+		ceCache.setIncludeIrrigationPumpFlag(updateCe.getIncludeIrrigationPump());
+		ceCache.setIncludeCropHeatFlag(updateCe.getIncludeCropHeat());
+		ceCache.setIncludeGeneratorFlag(updateCe.getIncludeGenerator());
+		ceCache.setIncludeAcSwitchFlag(updateCe.getIncludeHvacSwitch());
+		ceCache.setIncludeSingleHeatFlag(updateCe.getIncludeSingleHeat());
+		ceCache.setIncludeDualHeatFlag(updateCe.getIncludeDualHeat());
+		ceCache.setIncludeEvChargerFlag(updateCe.getIncludeEvCharger());
+		ceCache.setManageAllGrps(updateCe.getManageAllGroupsFlag());
+		ceCache.setPowerToRemove(updateCe.getPowerToRemove());
+		ceCache.setRecoveryTimeDelay(updateCe.getRecoveryTimeDelay());
+		ceCache.setStartTime(updateCe.getStartTime());
+		ceCache.setStopTime(updateCe.getStopTime());
+		ceCache.setName(updateCe.getName());
+		ceCache.setAutoCe(updateCe.getAutoCe());
+		ceCache.setiScadaReferenceID(updateCe.getScadaReferenceId());
+		ceCache.setOrigStopTime(updateCe.getOrigStopTime());
+		
+
+		if (OpsCenterConstants.TRUE.equals(updateCe.getCycling()))
+		{
+			ceCache.setMode(OpsCenterConstants.eventMode.CYCLING);
+			// now figure out if dutyCycle by dev type is active for this CE
+			CeDefinition ceDefinition = controlEventBean.getCeDefinitionForCe(updateCe.getControlEventId());
+			// Modified for Wifi tstat
+
+			if (ceDefinition != null)
+			{
+				logger.info("The ceDefinition.getDutyOff()" + ceDefinition.getDutyOff());
+				if (ceDefinition.getDutyOff() == 0xff) // this means dutyCycle
+														// by dev type is active
+					setDevTypeDutyCycle(ceCache, ceDefinition);
+			}
+
+		}
+		else
+		{
+			ceCache.setMode(OpsCenterConstants.eventMode.VPP);
+		}
+		// Added for Third Party Tstat
+		// Getting properties from DB
+		List<UtilityProperty> propertyList = genericFacade.getUtilityPropertyLikeKey(OpsCenterConstants.HONEYWELL_CE_LIKE);
+		if (propertyList == null || propertyList.size() <= 0)
+		{
+			logger.error("The Propert List is Null for Honeywell Ce");
+
+		}
+		else
+		{
+			for (UtilityProperty utilityproperty : propertyList)
+			{
+				if (utilityproperty.getKey() == null || utilityproperty.getValue() == null || utilityproperty.getKey().length() <= 0
+						|| utilityproperty.getValue().length() <= 0)
+
+				{
+					logger.error("The Propert List has key or Value as Null for Honeywell Ce");
+				}
+				else
+				{
+
+					if (utilityproperty.getKey().equalsIgnoreCase(OpsCenterConstants.HONEYWELL_RANDOMIZATION_INTERVAL))
+					{
+						String strRandomizationInterval = utilityproperty.getValue();
+						ceCache.setiRandomizationInterval(Integer.parseInt(strRandomizationInterval));
+					}
+					else if (utilityproperty.getKey().equalsIgnoreCase(OpsCenterConstants.HONEYWELL_ENABLED))
+					{
+						String strHoneywellEnabled = utilityproperty.getValue();
+						ceCache.setStrHoneywellEnabled(strHoneywellEnabled);
+					}
+					else if (utilityproperty.getKey().equalsIgnoreCase(OpsCenterConstants.HONEYWELL_HEAT_DELTA))
+					{
+						String strHoneyWellHeatDelta = utilityproperty.getValue();
+						ceCache.setdHeatDeltaWifiTstat(Double.valueOf(strHoneyWellHeatDelta));
+					}
+					else if (utilityproperty.getKey().equalsIgnoreCase(OpsCenterConstants.HONEYWELL_COOL_DELTA))
+					{
+						String strHoneyWellCoolDelta = utilityproperty.getValue();
+						ceCache.setdCoolDeltaCWifiTstat(Double.valueOf(strHoneyWellCoolDelta));
+					}
+
+				}
+
+			}
+		}
+		getControlEventCache().put(element);
+
+		logger.info("Exiting  updateControlEventCache-- cache updated for ceId= " + updateCe.getControlEventId());
+	}
+
+	private void setDevTypeDutyCycle(ControlEventCacheData ceCacheData, CeDefinition ceDef)
+	{
+
+		List<DefinitionDeviceMap> defDevMapList = controlEventBeanFacade.getCeDefinitionDeviceMapByDefId(ceDef.getDefinitionId());
+
+		for (DefinitionDeviceMap defDevMap : defDevMapList)
+		{
+			switch (defDevMap.getDeviceTypeId().getDeviceTypeId())
+			{
+			case OpsCenterConstants.DEVICE_TYPE_ID_TSTAT:
+				ceCacheData.setDutyCycleTstat(defDevMap.getDutyCycle());
+				logger.info("The DutyCycle tstat is" + ceCacheData.getDutyCycleTstat());
+				break;
+			case OpsCenterConstants.DEVICE_TYPE_ID_PP:
+				ceCacheData.setDutyCyclePP(defDevMap.getDutyCycle());
+				break;
+			case OpsCenterConstants.DEVICE_TYPE_ID_WH:
+				ceCacheData.setDutyCycleWH(defDevMap.getDutyCycle());
+				break;
+			case OpsCenterConstants.DEVICE_TYPE_ID_IRRIGATION_PUMP:
+				ceCacheData.setDutyCycleIP(defDevMap.getDutyCycle());
+				break;
+			case OpsCenterConstants.DEVICE_TYPE_ID_HS:
+				ceCacheData.setDutyCycleAcSwitch(defDevMap.getDutyCycle());
+				break;
+			case OpsCenterConstants.DEVICE_TYPE_ID_CROP_HEAT:
+				ceCacheData.setDutyCycleCropHeat(defDevMap.getDutyCycle());
+				break;
+			case OpsCenterConstants.DEVICE_TYPE_ID_GENERATOR:
+				ceCacheData.setDutyCycleGenerator(defDevMap.getDutyCycle());
+				break;
+			case OpsCenterConstants.DEVICE_TYPE_ID_SINGLE_HEAT:
+				ceCacheData.setDutyCycleSingleHeat(defDevMap.getDutyCycle());
+				break;
+			case OpsCenterConstants.DEVICE_TYPE_ID_DUAL_HEAT:
+				ceCacheData.setDutyCycleDualHeat(defDevMap.getDutyCycle());
+				break;
+
+			default:
+				logger.error("Invalid device type included in cache, cannot get dutyCycle, exiting");
+				break;
+			}
+
+		}
+
+	}
+
+	/**
+	 * @param grpPowerId
+	 * @param deliveryNetworkId
+	 * @param devType
+	 * @param powerAvail
+	 * @param powerConsumed
+	 * @param readingTime
+	 * @throws AbstractOpsCenterException
+	 * @throws InterruptedException
+	 */
+	private void updateCEGrpPowerCache(Integer grpPowerId, int deliveryNetworkId, String devType, double powerAvail, double powerConsumed, long readingTime)
+			throws AbstractOpsCenterException, InterruptedException
+	{
+
+		logger.debug("Entering grpPowerId=" + grpPowerId + " devType=" + devType + " powerAvail=" + powerAvail + " powerConsumed=" + powerConsumed
+				+ " readingTime=" + readingTime);
+		// setup
+		Element element = null;
+		CEGroupPowerCacheData grpCache = null;
+		CeGroupPower grp = null;
+		DateTime currTime = new DateTime();
+		// see if reading already exists for this interval
+
+		boolean modified = false;
+
+		// write lock in effect, proceed
+		if (!getCeGrpPowerCache().isKeyInCache(grpPowerId))
+		{
+			grp = controlEventBeanFacade.findCeGroupPowerByCeGroupPowerId(grpPowerId);
+			if (grp == null)
+			{
+				logger.error("CE GRP Power id not found in DB for id = " + grpPowerId);
+				return;
+			}
+
+			grpCache = new CEGroupPowerCacheData();
+			grpCache.setGrpPowerId(grpPowerId);
+			grpCache.setDevType(devType);
+			grpCache.setCeGrpId(grp.getCeGroupId().getCeGroupId());
+			grpCache.setProjPowerAvailable(0.0);
+			grpCache.setProjPowerConsumed(0.0);
+			element = new Element(grpCache.getGrpPowerId(), grpCache);
+			getCeGrpPowerCache().put(element);
+			modified = true;
+		}
+		else
+		{
+			// found already in cache just update the data in the element
+			element = getCeGrpPowerCache().get(grpPowerId);
+			grpCache = (CEGroupPowerCacheData) element.getObjectValue();
+		}
+
+		logger.debug("Before update grpPowerId Consumed=" + grpCache.getProjPowerConsumed() + "Available=" + grpCache.getProjPowerAvailable());
+
+		DateTime time = new DateTime(readingTime);
+		DateTime temp1 = time.withSecondOfMinute(0);
+		DateTime readingMinutes = temp1.withMillisOfSecond(0);
+		DateTime temp2 = currTime.withSecondOfMinute(0);
+		DateTime currMinutes = temp2.withMillisOfSecond(0);
+		// only increment energy values if the reading time of ESI is inside of
+		// staleTimeMin minutes-- this means ESI has not reported, dont consider
+		// its power
+		int readingLatency = getReadingIntervalMin(deliveryNetworkId);
+		if (readingMinutes.getMillis() >= currMinutes.minusMinutes(readingLatency).getMillis())
+		{
+			if (grpCache.getProjPowerConsumed() + powerConsumed < 0.0)
+			{
+				grpCache.setProjPowerConsumed(0.0);
+				grpCache.setProjPowerAvailable(0.0);
+			}
+			else
+			{
+				grpCache.setProjPowerConsumed(grpCache.getProjPowerConsumed() + powerConsumed);
+				grpCache.setProjPowerAvailable(grpCache.getProjPowerAvailable() + powerAvail);
+			}
+			modified = true;
+		}
+		// The far cache is updated only once per iteration of the
+		// ControlEventPowerTaskSchedular
+		if (modified)
+		{
+			getCeGrpPowerCache().put(element);
+		}
+
+		logger.debug("Exiting grpPowerId Consumed=" + grpCache.getProjPowerConsumed() + "Available=" + grpCache.getProjPowerAvailable());
+	}
+
+	public void addCEGrpPowerCache(Integer grpPowerId, String devType, double powerAvail, double powerConsumed)
+	{
+		logger.info("Inside addCEGrpPowerCache groupPowerid DevType" + grpPowerId + devType);
+
+		// setup
+		Element element = null;
+		CEGroupPowerCacheData grpCache = null;
+		CeGroupPower grp = null;
+		// see if reading already exists for this interval
+
+		// write lock in effect, proceed
+		if (!getCeGrpPowerCache().isKeyInCache(grpPowerId))
+		{
+			grp = controlEventBeanFacade.findCeGroupPowerByCeGroupPowerId(grpPowerId);
+			if (grp == null)
+			{
+				logger.error("CE GRP Power id not found in DB for id = " + grpPowerId);
+				return;
+			}
+			CeGroup g = controlEventBeanFacade.findCeGroupByCeGroupId(grp.getCeGroupId().getCeGroupId());
+
+			if (OpsCenterConstants.TRUE.equals(g.getDeleteFlag()))
+			{
+				// this grp has been deleted, do not add it to cache
+				return;
+			}
+			grpCache = new CEGroupPowerCacheData();
+			grpCache.setGrpPowerId(grpPowerId);
+			grpCache.setDevType(devType);
+			grpCache.setCeGrpId(grp.getCeGroupId().getCeGroupId());
+			grpCache.setProjPowerAvailable(0.0);
+			grpCache.setProjPowerConsumed(0.0);
+			element = new Element(grpCache.getGrpPowerId(), grpCache);
+			// ceGrpPowerCache.put(element);
+		}
+		else
+		{
+			// found already in cache just update the data in the element
+			logger.info("Found Already in cache" + grpPowerId);
+			element = getCeGrpPowerCache().get(grpPowerId);
+			grpCache = (CEGroupPowerCacheData) element.getObjectValue();
+		}
+		grpCache.setProjPowerConsumed(powerConsumed);
+		grpCache.setProjPowerAvailable(powerAvail);
+		getCeGrpPowerCache().put(element);
+
+	}
+
+	public void updateCEAccountMapCache(CeAccountMap ceAccMap, int grpMapId, int esiId, ControlEvent ceId)
+	{
+
+		// setup
+		Element element = null;
+		CEAccountMapCacheData accMapCache = null;
+		if (null == ceAccMap)
+		{
+			logger.debug("ceAccMap entity is null... exiting.");
+			return;
+		}
+		// see if reading already exists for this interval
+		int ceAccMapKey = ceAccMap.getCeAccountMapId();
+
+		if (!getCeAccMapCache().isKeyInCache(ceAccMapKey))
+		{
+			accMapCache = new CEAccountMapCacheData();
+			accMapCache.setCeAccMapId(ceAccMapKey);
+			accMapCache.setCriticalFlag(ceId.getCriticalFlag());
+			accMapCache.setHasDrifted(false);
+			element = new Element(accMapCache.getCeAccMapId(), accMapCache);
+		}
+		else
+		{
+			// found already in cache just update the data in the element
+			element = getCeAccMapCache().get(ceAccMapKey);
+			accMapCache = (CEAccountMapCacheData) element.getObjectValue();
+		}
+		accMapCache.setInitialPowerRemovable(ceAccMap.getInitialPowerRemovable());
+		accMapCache.setPowerConsumed(ceAccMap.getPowerConsumed());
+		accMapCache.setCeAccId(ceAccMap.getAccountId().getAccountId());
+		accMapCache.setEsiId(esiId);
+		accMapCache.setCeId(ceAccMap.getControlEventId().getControlEventId());
+		accMapCache.setCeGrpId(ceAccMap.getCeGroupId().getCeGroupId());
+		accMapCache.setPowerToRemove(ceAccMap.getPowerToRemove());
+		accMapCache.setStartTime(ceAccMap.getStartTime());
+		accMapCache.setUserId(ceAccMap.getUserId().getUserId());
+		accMapCache.setCeGroupMapId(grpMapId);
+		// krmt-6126-- need to set duty_cycle to prevent drifting in cycling evt
+		accMapCache.setDutyCycle(ceAccMap.getDutyCycle());
+
+		getCeAccMapCache().put(element);
+
+		logger.debug("Exiting  updateCEAccountMapCache-- cache updated for accMapid = " + accMapCache.getCeAccMapId());
+	}
+
+	public void deleteCEAccountMapCacheEntry(int ceAccMapId) throws AbstractOpsCenterException
+	{
+		// see entry exists in Cache
+		if (getCeAccMapCache().isKeyInCache(ceAccMapId))
+		{
+			getCeAccMapCache().remove(ceAccMapId);
+		}
+		else
+		{
+			logger.error("CeAccountMapCache entry not found in cache--not deleted");
+		}
+		logger.info("Exiting  deleteCEAccountMapCacheEntry-- cache deleted accMapid = " + ceAccMapId);
+	}
+
+	public void deleteCEGroupCacheEntry(int ceGrpId)
+	{
+
+		// see entry exists in Cache
+
+		if (getCeGrpCache().isKeyInCache(ceGrpId))
+		{
+
+			getCeGrpCache().remove(ceGrpId);
+			if (!getCeGrpCache().isKeyInCache(ceGrpId))
+			{
+				logger.debug("********Checked cache, grp is no longer in grpcache" + ceGrpId);
+			}
+
+		}
+		else
+		{
+			logger.error("CeGroupCache entry not found in cache--not deleted");
+		}
+
+		logger.info("Exiting  deleteCEGroupCacheEntry-- cache deleted ceGrpId = " + ceGrpId);
+	}
+
+	public void deleteCEGroupPowerCacheEntry(int ceGrpId)
+	{
+
+		// see entry exists in Cache
+
+		if (getCeGrpPowerCache().isKeyInCache(ceGrpId))
+		{
+
+			getCeGrpCache().remove(ceGrpId);
+			if (!getCeGrpCache().isKeyInCache(ceGrpId))
+			{
+				logger.debug("********Checked cache, grp is no longer in grpPowercache" + ceGrpId);
+			}
+		}
+		else
+		{
+			logger.error("CeGroupCache entry not found in cache--not deleted");
+		}
+
+		logger.info("Exiting  deleteCEGroupPowerCacheEntry-- cache deleted ceGrpId = " + ceGrpId);
+	}
+
+	public void deleteControlEventCacheEntry(Integer ceId) throws AbstractOpsCenterException
+	{
+		// If CE entry exists in the cache, delete it
+		if (getControlEventCache().isKeyInCache(ceId))
+		{
+			getControlEventCache().remove(ceId);
+
+		}
+		else
+		{
+			logger.error("CeGroupMapCache entry not found in cache--not deleted");
+		}
+
+		logger.info("Exiting  deleteControlEventCacheEntry-- cache deleted ceId = " + ceId);
+	}
+
+	public void deleteCEGroupMapCacheEntry(Integer ceGrpMapId) throws AbstractOpsCenterException
+	{
+
+		// see entry exists in Cache
+
+		if (getCeGrpMapCache().isKeyInCache(ceGrpMapId))
+		{
+			getCeGrpMapCache().remove(ceGrpMapId);
+		}
+		else
+		{
+			logger.error("CeGroupMapCache entry not found in cache--not deleted");
+		}
+
+		logger.info("Exiting  deleteCEGroupMapCacheEntry-- cache deleted ceGrpMapId = " + ceGrpMapId);
+	}
+
+	public void deleteCEDevicesCacheEntry(int ceDevicesId) throws AbstractOpsCenterException
+	{
+
+		// If CE device entry exists in cache, remove it
+		if (getCeDevCache().isKeyInCache(ceDevicesId))
+		{
+			getCeDevCache().remove(ceDevicesId);
+		}
+		else
+		{
+			logger.error("CeDevicesCache entry not found in cache--not deleted");
+		}
+		logger.info("Exiting  deleteCEDevicesCacheEntry-- cache deleted ceDevicesMapid = " + ceDevicesId);
+	}
+
+	public void updateCEDevicesCache(CeDevices ceDev, int ceId, int ceGroupMapId) throws AbstractOpsCenterException
+	{
+
+		// setup
+		Element element = null;
+		CEDevicesCacheData devMapCache = null;
+
+		// see if reading already exists for this interval
+		Integer ceKey = ceDev.getCeDevicesId();
+		logger.debug("ceKey = ceDev.getCeDevicesId() = " + ceKey);
+
+		if (!getCeDevCache().isKeyInCache(ceKey))
+		{
+			devMapCache = new CEDevicesCacheData();
+			// Setting immutable fields
+			devMapCache.setCeDevicesId(ceKey);
+			devMapCache.setHasDrifted(false);
+			devMapCache.setCeAccMapId(ceDev.getCeAccountMapId().getCeAccountMapId());
+			logger.debug("just wrote ceAccMapId in ceDevices cache , id = " + devMapCache.getCeAccMapId());
+			devMapCache.setDevTypeId(ceDev.getDeviceTypeId());
+			devMapCache.setEsiDcId(ceDev.getEsiDcId().getEsiDcId());
+			devMapCache.setCeId(ceId);
+			devMapCache.setCeGroupMapId(ceGroupMapId);
+			element = new Element(devMapCache.getCeDevicesId(), devMapCache);
+		}
+		else
+		{
+			logger.debug("CE Dev already in cache updating");
+			// found already in cache just update the data in the element
+			element = getCeDevCache().get(ceKey);
+			devMapCache = (CEDevicesCacheData) element.getObjectValue();
+		}
+
+		// I believe IntialPowerRemoveable & StartTime are immutable
+		devMapCache.setIntialPowerRemoveable(ceDev.getInitialPowerRemovable());
+		DateTime startTime = ceDev.getStartTime();
+		devMapCache.setStartTime(startTime == null ? 0 : startTime.getMillis());
+
+		// Setting mutable fields
+		devMapCache.setDriftPowerConsumed(ceDev.getDriftPowerConsumed());
+		DateTime endTime = ceDev.getStopTime();
+		devMapCache.setEndTime(endTime == null ? 0 : endTime.getMillis());
+
+		getCeDevCache().put(element);
+		logger.info("Exiting  updateCEDevCache-- cache updated for devId = " + ceKey);
+		logger.debug("ceId being used as key for DevMapCache is: " + ceId);
+	}
+
+	public void updateCEGrpMapCache(Integer grpMapId, double addPower, double powerToRemove, String powerInPercent) throws AbstractOpsCenterException,
+			InterruptedException
+	{
+
+		// setup
+		Element element = null;
+		CEGroupMapCacheData grpMapCache = null;
+		CeGroupMap grp = null;
+
+		if (!getCeGrpMapCache().isKeyInCache(grpMapId))
+		{
+			grp = controlEventBeanFacade.findCeGroupMapByCeGroupMapId(grpMapId);
+			if (grp == null)
+			{
+				logger.error("CE GRP Map  id not found in DB for id = " + grpMapId);
+				return;
+			}
+
+			grpMapCache = new CEGroupMapCacheData();
+			grpMapCache.setCeGrpMapId(grpMapId);
+			grpMapCache.setIntialPowerToRemoveable(grp.getInitialPowerToRemove());
+			grpMapCache.setModifiedCount(grp.getModifiedCount());
+			grpMapCache.setGrpPowerFallenFlag(grp.getGroupPowerFallenFlag());
+			grpMapCache.setGrpOrder(grp.getCeGroupOrder());
+			grpMapCache.setCeGrpId(grp.getCeGroupId().getCeGroupId());
+			grpMapCache.setCeId(grp.getControlEventId().getControlEventId());
+			grpMapCache.setPowerInPercent(powerInPercent);
+			grpMapCache.setDutyCycle(grp.getDutyCycle());
+
+			element = new Element(grpMapCache.getCeGrpMapId(), grpMapCache);
+		}
+		else
+		{
+			// found already in cache just update the data in the element
+			element = getCeGrpMapCache().get(grpMapId);
+			grpMapCache = (CEGroupMapCacheData) element.getObjectValue();
+		}
+
+		grpMapCache.setDateModified(System.currentTimeMillis());
+		grpMapCache.setAdditionalPowerToRemove(addPower);
+		grpMapCache.setPowerToRemove(powerToRemove);
+		getCeGrpMapCache().put(element);
+
+		logger.info("Exiting  updateCEGrpMapCache-- cache updated for GrpMapId = " + grpMapId);
+	}
+
+	public Results getCacheData(Cache cache)
+	{
+		Query query = cache.createQuery();
+		query.includeValues();
+		Results results = query.execute();
+		query.end();
+		return results;
+	}
+
+	public Results getCacheDataByEsiId(Cache cache, int esi)
+	{
+
+		Attribute<Integer> esiId = cache.getSearchAttribute("esiId");
+
+		Query query = cache.createQuery();
+		query.includeValues();
+		query.addCriteria(esiId.eq(esi));
+		Results results = query.execute();
+		query.end();
+		return results;
+	}
+
+	public Results getCacheDataActEnergyConsumed(Cache cache)
+	{
+
+		Attribute<Double> actEnergy = cache.getSearchAttribute("actEnergyConsumed");
+		Query query = cache.createQuery();
+		query.includeValues();
+		query.addCriteria(actEnergy.gt(0.0));
+		Results results = query.execute();
+		query.end();
+		return results;
+	}
+
+	public Results getCacheDataActEnergyConsumedAndMode(Cache cache)
+	{
+
+		Attribute<Double> actEnergy = cache.getSearchAttribute("actEnergyConsumed");
+		Attribute<Byte> esiMode = cache.getSearchAttribute("esiMode");
+		Query query = cache.createQuery();
+		query.includeValues();
+		query.addCriteria(actEnergy.gt(0.0).and(esiMode.eq(OpsCenterConstants.ESI_MODE_NORMAL)));
+		Results results = query.execute();
+		query.end();
+		return results;
+	}
+
+	public Results getCacheDataForGSDevices(Cache cache)
+	{
+
+		Attribute<Long> devMac = cache.getSearchAttribute("deviceMacId");
+		Long empty = new Long(0);
+		Query query = cache.createQuery();
+		query.includeValues();
+		query.addCriteria(devMac.ne(empty.longValue()));
+		Results results = query.execute();
+		query.end();
+		return results;
+	}
+
+	public Results getCacheDataForGSDevices(Cache cache, long devMacId)
+	{
+
+		Attribute<Long> devMac = cache.getSearchAttribute("deviceMacId");
+		Query query = cache.createQuery();
+		query.includeValues();
+		query.addCriteria(devMac.eq(devMacId));
+		Results results = query.execute();
+		query.end();
+		return results;
+	}
+
+	public Results getCacheDataActEnergyConsumedAndModeAndAccId(Cache cache, int accId)
+	{
+
+		Attribute<Double> actEnergy = cache.getSearchAttribute("actEnergyConsumed");
+		Attribute<Integer> accountId = cache.getSearchAttribute("accountId");
+		Attribute<Byte> esiMode = cache.getSearchAttribute("esiMode");
+		Attribute<Byte> roundRobinCnt = cache.getSearchAttribute("roundRobinCnt");
+		Query query = cache.createQuery();
+		query.includeValues();
+		query.addCriteria(actEnergy.gt(0.0).and(accountId.eq(accId).and(esiMode.eq(OpsCenterConstants.ESI_MODE_NORMAL))));
+		query.addOrderBy(roundRobinCnt, Direction.ASCENDING);
+		query.addOrderBy(actEnergy, Direction.DESCENDING);
+		Results results = query.execute();
+		return results;
+	}
+
+	public Results getAllCacheDataActEnergyConsumedAndModeAndAccId(Cache cache, List<Integer> accIdList)
+	{
+
+		Attribute<Double> actEnergy = cache.getSearchAttribute("actEnergyConsumed");
+		Attribute<Integer> accountId = cache.getSearchAttribute("accountId");
+		Attribute<Byte> esiMode = cache.getSearchAttribute("esiMode");
+		Attribute<Byte> roundRobinCnt = cache.getSearchAttribute("roundRobinCnt");
+		Attribute<String> nwType = cache.getSearchAttribute("nwType");
+		Query query = cache.createQuery();
+		// query.includeKeys();
+		query.includeValues();
+		query.addCriteria(actEnergy.gt(0.0).and(
+				accountId.in(accIdList).and(esiMode.eq(OpsCenterConstants.ESI_MODE_NORMAL)).and(nwType.eq(OpsCenterConstants.VERIZON_CELLULAR_DELIVERY))));
+		query.addOrderBy(roundRobinCnt, Direction.ASCENDING);
+		query.addOrderBy(actEnergy, Direction.DESCENDING);
+		Results results = query.execute();
+		return results;
+	}
+
+	public Results getAllCacheDataActEnergyConsumedAndDcModeAndAccId(Cache cache, List<Integer> accIdList)
+	{
+
+		Attribute<Double> actEnergy = cache.getSearchAttribute("actEnergyConsumed");
+		Attribute<Integer> accountId = cache.getSearchAttribute("accountId");
+		Attribute<Byte> dcMode = cache.getSearchAttribute("dcMode");
+		Attribute<Byte> roundRobinCnt = cache.getSearchAttribute("roundRobinCnt");
+		Attribute<Long> deviceMacid = cache.getSearchAttribute("deviceMacId");
+		Long empty = new Long(0);
+		Query query = cache.createQuery();
+		// query.includeKeys();
+		query.includeValues();
+		query.addCriteria(deviceMacid.ne(empty).and(actEnergy.gt(0.0).and(accountId.in(accIdList).and(dcMode.eq(OpsCenterConstants.ESI_MODE_NORMAL)))));
+		query.addOrderBy(roundRobinCnt, Direction.ASCENDING);
+		query.addOrderBy(actEnergy, Direction.DESCENDING);
+		Results results = query.execute();
+		return results;
+	}
+
+	public Results getAllCacheDataDcModeAndAccId(Cache cache, List<Integer> accIdList)
+	{
+
+		Attribute<Integer> accountId = cache.getSearchAttribute("accountId");
+		Attribute<Byte> dcMode = cache.getSearchAttribute("dcMode");
+		Attribute<Byte> roundRobinCnt = cache.getSearchAttribute("roundRobinCnt");
+		Attribute<Long> deviceMacid = cache.getSearchAttribute("deviceMacId");
+		Long empty = new Long(0);
+		Query query = cache.createQuery();
+		// query.includeKeys();
+		query.includeValues();
+		query.addCriteria(deviceMacid.ne(empty).and(
+				accountId.in(accIdList).and(dcMode.eq(OpsCenterConstants.ESI_MODE_NORMAL).or(dcMode.eq(OpsCenterConstants.ESI_MODE_UNKNOWN)).or(dcMode.eq(OpsCenterConstants.ESI_MODE_CONTROL_REQUESTED)))));
+		query.addOrderBy(roundRobinCnt, Direction.ASCENDING);
+		Results results = query.execute();
+		return results;
+	}
+
+	public Results getAllCacheDataAndModeAndAccId(Cache cache, List<Integer> accIdList)
+	{
+
+		Attribute<Integer> accountId = cache.getSearchAttribute("accountId");
+		Attribute<Byte> esiMode = cache.getSearchAttribute("esiMode");
+		Attribute<Byte> roundRobinCnt = cache.getSearchAttribute("roundRobinCnt");
+		Attribute<String> nwType = cache.getSearchAttribute("nwType");
+		Query query = cache.createQuery();
+		// query.includeKeys();
+		query.includeValues();
+		query.addCriteria(accountId.in(accIdList).and(esiMode.eq(OpsCenterConstants.ESI_MODE_NORMAL))
+				.and(nwType.eq(OpsCenterConstants.VERIZON_CELLULAR_DELIVERY)));
+		query.addOrderBy(roundRobinCnt, Direction.ASCENDING);
+		Results results = query.execute();
+		return results;
+	}
+
+	public Results getCacheDataByEsiDcId(Cache cache, Collection<Integer> esiDcIdList)
+	{
+
+		Attribute<Integer> esiDcId = cache.getSearchAttribute("esiDcId");
+
+		Query query = cache.createQuery();
+		// query.includeKeys();
+		query.includeValues();
+		query.addCriteria(esiDcId.in(esiDcIdList));
+		Results results = query.execute();
+		return results;
+	}
+
+	public Results getCacheDataByEsiDcId(Cache cache, int esiDcId)
+	{
+
+		Attribute<Integer> dcId = cache.getSearchAttribute("esiDcId");
+
+		Query query = cache.createQuery();
+		// query.includeKeys();
+		query.includeValues();
+		query.addCriteria(dcId.eq(esiDcId));
+		Results results = query.execute();
+		return results;
+	}
+
+	public Results getCacheDataByDeviceMacId(Cache cache, long deviceMacId)
+	{
+		Attribute<Long> macId = cache.getSearchAttribute("deviceMacId");
+
+		Query query = cache.createQuery();
+		// query.includeKeys();
+		query.includeValues();
+		query.addCriteria(macId.eq(deviceMacId));
+		Results results = query.execute();
+		return results;
+	}
+
+	public Results getCacheDataByEsiTstatId(Cache cache, int esiTstatId)
+	{
+
+		Attribute<Integer> esiTstatid = cache.getSearchAttribute("esiTstatId");
+
+		Query query = cache.createQuery();
+		query.includeValues();
+		query.addCriteria(esiTstatid.eq(esiTstatId));
+		Results results = query.execute();
+		return results;
+	}
+
+	// KRMT-2676 Program Push Scheduler Optimization
+
+	public Results getAllCacheDataByAccIdInservice(Cache cache, List<Integer> accIdList)
+	{
+
+		Attribute<Integer> accountId = cache.getSearchAttribute("accountId");
+		Attribute<Byte> esiMode = cache.getSearchAttribute("esiMode");
+		Attribute<String> outageFlag = cache.getSearchAttribute("outageFlag");
+
+		Query query = cache.createQuery();
+		// query.includeKeys();
+		query.includeValues();
+		query.addCriteria(accountId.in(accIdList).and(esiMode.ne(OpsCenterConstants.ESI_MODE_MAINTENANCE))
+				.and(outageFlag.ne(OpsCenterConstants.POWER_OUTAGE_FLAG)).and(esiMode.ne(OpsCenterConstants.ESI_MODE_UNMANAGED)));
+		Results results = query.execute();
+		return results;
+	}
+
+	public Results getCacheDataControlEventId(Cache cache, int ce)
+	{
+
+		Attribute<Integer> ceId = cache.getSearchAttribute("ceId");
+
+		Query query = cache.createQuery();
+		query.includeValues();
+		query.addCriteria(ceId.eq(ce));
+		Results results = query.execute();
+		return results;
+	}
+
+	public Results getCacheDataControlEventIdAndDriftPower(Cache cache, int ce)
+	{
+
+		Attribute<Integer> ceId = cache.getSearchAttribute("ceId");
+		Attribute<Double> driftPowerConsumed = cache.getSearchAttribute("driftPowerConsumed");
+
+		Query query = cache.createQuery();
+		query.includeValues();
+		query.addCriteria(ceId.eq(ce).and(driftPowerConsumed.gt(0.0)));
+		Results results = query.execute();
+		return results;
+	}
+
+	public Results getCacheDataControlEventIdAndGrpid(Cache cache, int ce, int grpId)
+	{
+
+		Attribute<Integer> ceId = cache.getSearchAttribute("ceId");
+		Attribute<Integer> ceGrpId = cache.getSearchAttribute("ceGrpId");
+
+		Query query = cache.createQuery();
+		query.includeValues();
+		query.addCriteria(ceId.eq(ce).and(ceGrpId.eq(grpId)));
+		Results results = query.execute();
+		return results;
+	}
+
+	public Results getCacheDataAccMapId(Cache cache, int accMap)
+	{
+
+		Attribute<Integer> ceAccMapId = cache.getSearchAttribute("ceAccMapId");
+
+		Query query = cache.createQuery();
+		query.includeValues();
+		query.addCriteria(ceAccMapId.eq(accMap));
+		Results results = query.execute();
+		return results;
+	}
+
+	public Results getCacheDataByAccMapIdAndDriftTime(Cache cache, List<Integer> accIdList)
+	{
+
+		Attribute<Integer> ceAccMapId = cache.getSearchAttribute("ceAccMapId");
+		Attribute<Boolean> hasDrifted = cache.getSearchAttribute("hasDrifted");
+
+		Query query = cache.createQuery();
+		query.includeValues();
+		query.addCriteria(ceAccMapId.in(accIdList).and(hasDrifted.eq(true)));
+		Results results = query.execute();
+		return results;
+
+	}
+
+	public Results getCacheDataByAccMapIdAndNotEnded(Cache cache, List<Integer> accIdList)
+	{
+
+		Attribute<Integer> ceAccMapId = cache.getSearchAttribute("ceAccMapId");
+		Attribute<Long> endTime = cache.getSearchAttribute("endTime");
+
+		Query query = cache.createQuery();
+		query.includeValues();
+		query.addCriteria(ceAccMapId.in(accIdList).and(endTime.le(0L)));
+		Results results = query.execute();
+		return results;
+
+	}
+
+	public Results getCacheDataByGrpMapIdAndNotEnded(Cache cache, int grpMapId)
+	{
+
+		Attribute<Integer> ceGrpMapId = cache.getSearchAttribute("ceGrpMapId");
+		Attribute<Long> endTime = cache.getSearchAttribute("endTime");
+		Attribute<Boolean> drifted = cache.getSearchAttribute("hasDrifted");
+		Query query = cache.createQuery();
+		query.includeValues();
+		query.addCriteria(ceGrpMapId.eq(grpMapId).and(endTime.le(0L)).and(drifted.ne(true)));
+		Results results = query.execute();
+		return results;
+
+	}
+
+	public Results getCacheDataByGrpMapIdAndEnded(Cache cache, int grpMapId)
+	{
+
+		Attribute<Integer> ceGrpMapId = cache.getSearchAttribute("ceGrpMapId");
+		Attribute<Long> endTime = cache.getSearchAttribute("endTime");
+
+		Query query = cache.createQuery();
+		query.includeValues();
+		long now = System.currentTimeMillis();
+		query.addCriteria(ceGrpMapId.eq(grpMapId).and(endTime.gt(0L)).and(endTime.le(now)));
+		Results results = query.execute();
+		return results;
+
+	}
+
+	public Results getCacheDataByGrpMapId(Cache cache, int grpMapId)
+	{
+
+		Attribute<Integer> ceGrpMapId = cache.getSearchAttribute("ceGrpMapId");
+
+		Query query = cache.createQuery();
+		query.includeValues();
+		query.addCriteria(ceGrpMapId.eq(grpMapId));
+		Results results = query.execute();
+		return results;
+
+	}
+
+	public Results getCacheDataByAccIdRoundRobin(Cache cache, List<Integer> accIdList)
+	{
+
+		Attribute<Integer> ceAccMapId = cache.getSearchAttribute("accountId");
+		Attribute<Byte> esiMode = cache.getSearchAttribute("esiMode");
+		Attribute<Byte> roundRobinCnt = cache.getSearchAttribute("roundRobinCnt");
+		Query query = cache.createQuery();
+		query.includeValues();
+		query.addCriteria(ceAccMapId.in(accIdList).and(esiMode.eq(OpsCenterConstants.ESI_MODE_NORMAL)));
+		query.addOrderBy(roundRobinCnt, Direction.ASCENDING);
+		Results results = query.execute();
+		return results;
+
+	}
+
+	public Results getCacheDataByAccMapId(Cache cache, List<Integer> accIdList)
+	{
+
+		Attribute<Integer> ceAccMapId = cache.getSearchAttribute("ceAccMapId");
+		Query query = cache.createQuery();
+		query.includeValues();
+		query.addCriteria(ceAccMapId.in(accIdList));
+		Results results = query.execute();
+		return results;
+
+	}
+
+	public Results getCacheDataByCeGrpId(Cache cache, int ceGrp)
+	{
+
+		Attribute<Integer> ceGrpId = cache.getSearchAttribute("ceGrpId");
+		Query query = cache.createQuery();
+		query.includeValues();
+		query.addCriteria(ceGrpId.eq(ceGrp));
+		Results results = query.execute();
+		query.end();
+		return results;
+	}
+
+	public Results getCacheDataByCeIdNotNull(Cache cache)
+	{
+
+		Attribute<Integer> ceId = cache.getSearchAttribute("ceId");
+		int zero = 0;
+		Query query = cache.createQuery();
+		query.includeValues();
+		query.addCriteria(ceId.gt(zero));
+		Results results = query.execute();
+		query.end();
+		return results;
+	}
+
+	public Results getCacheDataInControl(Cache cache)
+	{
+
+		Attribute<Byte> dcMode = cache.getSearchAttribute("currentManageMode");
+		Query query = cache.createQuery();
+		query.includeValues();
+		query.addCriteria(dcMode.eq(OpsCenterConstants.ESI_MODE_CONTROL));
+		Results results = query.execute();
+		query.end();
+		return results;
+	}
+
+	public Results getCacheByActEnergyConsumedAndEsiId(Cache dcCache, int esi)
+	{
+
+		Attribute<Integer> esiId = dcCache.getSearchAttribute("esiId");
+		Attribute<Double> actEnergy = dcCache.getSearchAttribute("actEnergyConsumed");
+		Query query = dcCache.createQuery();
+		query.includeValues();
+		query.addCriteria(actEnergy.gt(0.0).and(esiId.eq(esi)));
+		Results results = query.execute();
+		query.end();
+		return results;
+	}
+
+	public Results getAllCacheByEsiIdList(Cache dcCache, List<Integer> esiList)
+	{
+
+		Attribute<Integer> esiId = dcCache.getSearchAttribute("esiId");
+		Query query = dcCache.createQuery();
+		// query.includeKeys();
+		query.includeValues();
+		query.addCriteria(esiId.in(esiList));
+		query.addOrderBy(esiId, Direction.ASCENDING);
+		Results results = query.execute();
+		query.end();
+		return results;
+	}
+
+	public Results getAllCacheByGrpIdList(Cache dcCache, List<Integer> grpList)
+	{
+
+		Attribute<Integer> grpId = dcCache.getSearchAttribute("ceGrpId");
+		Query query = dcCache.createQuery();
+		// query.includeKeys();
+		query.includeValues();
+		query.addCriteria(grpId.in(grpList));
+		query.addOrderBy(grpId, Direction.ASCENDING);
+		Results results = query.execute();
+		query.end();
+		return results;
+	}
+
+	public Results getAllCacheByEsiIdListAndEnergyAvail(Cache dcCache, List<Integer> esiList)
+	{
+
+		Attribute<Integer> esiId = dcCache.getSearchAttribute("esiId");
+		Attribute<Double> actEnergyAvail = dcCache.getSearchAttribute("actEnergyAvail");
+		Query query = dcCache.createQuery();
+		// query.includeKeys();
+		query.includeValues();
+		query.addCriteria(actEnergyAvail.gt(0.0).and(esiId.in(esiList)));
+		query.addOrderBy(esiId, Direction.ASCENDING);
+		Results results = query.execute();
+		query.end();
+		return results;
+	}
+
+	public Results getCacheDataByAccId(Cache cache, int acc)
+	{
+
+		Attribute<Integer> accountId = cache.getSearchAttribute("accountId");
+		Query query = cache.createQuery();
+		query.includeValues();
+		query.addCriteria(accountId.eq(acc));
+		Results results = query.execute();
+		query.end();
+		return results;
+	}
+
+	public Results getCacheDataKeysByAccIdList(Cache cache, List<Integer> accIdList)
+	{
+
+		Attribute<Integer> accountId = cache.getSearchAttribute("accountId");
+		Query query = cache.createQuery();
+		query.includeKeys();
+		query.addCriteria(accountId.in(accIdList));
+		Results results = query.execute();
+		query.end();
+		return results;
+	}
+
+	public Results getCacheDataByCeAccId(Cache cache, int acc)
+	{
+
+		Attribute<Integer> ceAccId = cache.getSearchAttribute("ceAccId");
+		Query query = cache.createQuery();
+		query.includeValues();
+		query.addCriteria(ceAccId.eq(acc));
+		Results results = query.execute();
+		query.end();
+		return results;
+	}
+
+	public Results getCacheDataByCeAccMapId(Cache cache, int ceAccMapId)
+	{
+
+		Attribute<Integer> ceAccMap = cache.getSearchAttribute("ceAccMapId");
+		Query query = cache.createQuery();
+		query.includeValues();
+		query.addCriteria(ceAccMap.eq(ceAccMapId));
+		Results results = query.execute();
+		query.end();
+		return results;
+	}
+
+	public Results getCacheDataByCeId(Cache cache, int id)
+	{
+
+		Attribute<Integer> ceId = cache.getSearchAttribute("ceId");
+		Query query = cache.createQuery();
+		query.includeValues();
+		query.addCriteria(ceId.eq(id));
+		Results results = query.execute();
+		query.end();
+		return results;
+	}
+
+	public Results getCacheDataByCeIdAndEsiDcId(Cache cache, int ce, int esiDc)
+	{
+		Attribute<Integer> ceId = cache.getSearchAttribute("ceId");
+		Attribute<Integer> esiDcId = cache.getSearchAttribute("esiDcId");
+		Query query = cache.createQuery();
+		query.includeValues();
+		query.addCriteria(ceId.eq(ce).and(esiDcId.eq(esiDc)));
+		Results results = query.execute();
+		query.end();
+		return results;
+	}
+
+	public Results getCacheDataByCeIdAndEsiId(Cache cache, int ce, int esi)
+	{
+		Attribute<Integer> ceId = cache.getSearchAttribute("ceId");
+		Attribute<Integer> esiId = cache.getSearchAttribute("esiId");
+		Query query = cache.createQuery();
+		query.includeValues();
+		query.addCriteria(ceId.eq(ce).and(esiId.eq(esi)));
+		Results results = query.execute();
+		query.end();
+		return results;
+	}
+
+	public Results getCacheByProjPowerAvailableAndGrpId(Cache dcCache, int grp)
+	{
+
+		Attribute<Integer> cegrpId = dcCache.getSearchAttribute("ceGrpId");
+		Attribute<Double> projPowerAvail = dcCache.getSearchAttribute("projPowerAvailable");
+		Query query = dcCache.createQuery();
+		query.includeValues();
+		query.addCriteria(projPowerAvail.gt(0.0).and(cegrpId.eq(grp)));
+		Results results = query.execute();
+		query.end();
+		return results;
+	}
+
+	public Results getCacheDataByDateInterval(Cache cache, long dateIntervalParam)
+	{
+
+		Attribute<Long> dateInterval = cache.getSearchAttribute("dateInterval");
+		Query query = cache.createQuery();
+		query.includeValues();
+		query.addCriteria(dateInterval.lt(dateIntervalParam));
+		Results results = query.execute();
+		query.end();
+		return results;
+	}
+
+	public Results getCacheByActEnergyAvailAndMode(Cache cache)
+	{
+
+		Attribute<Byte> esiMode = cache.getSearchAttribute("esiMode");
+		Attribute<Double> actEnergyAvail = cache.getSearchAttribute("actEnergyAvail");
+		Query query = cache.createQuery();
+		query.includeValues();
+		query.addCriteria(actEnergyAvail.gt(0.0).and(esiMode.eq(OpsCenterConstants.ESI_MODE_NORMAL)));
+		Results results = query.execute();
+		query.end();
+		return results;
+	}
+
+	public Results getCacheDataByUtilityMeterNumber(Cache cache, String meterNumber)
+	{
+
+		// Attribute<Integer> accountId = cache.getSearchAttribute("accountId");
+		Attribute<String> utilityMeterNumber = cache.getSearchAttribute("utilityMeterNumber");
+		Attribute<Long> readingTime = cache.getSearchAttribute("readingTime");
+		Query query = cache.createQuery();
+		query.includeValues();
+		// query.addCriteria(accountId.eq(acc));
+		query.addCriteria(utilityMeterNumber.eq(meterNumber));
+		// return reads from most recent to least recent in case there are
+		// multiple
+		query.addOrderBy(readingTime, Direction.DESCENDING);
+		Results results = query.execute();
+		query.end();
+		return results;
+	}
+
+	public Double getCacheDataActEnergyConsumedSum(Cache cache)
+	{
+		DateTime now = new DateTime();
+		Double totalEnergy = 0.0;
+		long staleTime = now.getMillis() - getStaleTimeMin() * 60 * 1000;
+		Attribute<Double> actEnergy = cache.getSearchAttribute("actEnergyConsumed");
+		Attribute<Long> readingTime = cache.getSearchAttribute("readingTime");
+		Query query = cache.createQuery();
+		query.addCriteria(readingTime.ge(staleTime));
+		query.includeAggregator(actEnergy.sum());
+		Results results = query.execute();
+		query.end();
+		List<Result> resultList = results.all();
+		if (!resultList.isEmpty())
+		{
+			Result result = resultList.get(0);
+			totalEnergy = (Double) result.getAggregatorResults().get(0);
+		}
+		return totalEnergy;
+	}
+
+	public Double getCacheDataActEnergyConsumedSumVPPOnly(Cache cache)
+	{
+		DateTime now = new DateTime();
+		Double totalEnergy = 0.0;
+		long staleTime = now.getMillis() - getStaleTimeMin() * 60 * 1000;
+		Attribute<Double> actEnergy = cache.getSearchAttribute("actEnergyConsumed");
+		Attribute<Long> readingTime = cache.getSearchAttribute("readingTime");
+		Attribute<String> deviceType = cache.getSearchAttribute("deviceType");
+		Query query = cache.createQuery();
+		query.addCriteria(readingTime.ge(staleTime));
+		// Exclude HVAC Switch from VPP Only power consumption
+		query.addCriteria(deviceType.ne(OpsCenterConstants.DC_HVAC_SWITCH));
+		query.addCriteria(deviceType.ne(OpsCenterConstants.DC_SINGLE_HEAT));
+		query.addCriteria(deviceType.ne(OpsCenterConstants.DC_DUAL_HEAT));
+		query.includeAggregator(actEnergy.sum());
+		Results results = query.execute();
+		query.end();
+		List<Result> resultList = results.all();
+		if (!resultList.isEmpty())
+		{
+			Result result = resultList.get(0);
+			totalEnergy = (Double) result.getAggregatorResults().get(0);
+		}
+		return totalEnergy;
+	}
+
+	public Double getCacheDataActEnergyForGroupConsumedSumVPPOnly(Cache esiCache, Cache dcCache, int autoGroupId)
+	{
+		// Get ESI records for
+		Attribute<Integer> autoGroupIdAttr = esiCache.getSearchAttribute("autoGroupId");
+		Query esiQuery = esiCache.createQuery();
+		esiQuery.addCriteria(autoGroupIdAttr.eq(autoGroupId));
+		esiQuery.includeValues();
+		Results esiResults = esiQuery.execute();
+		esiQuery.end();
+		List<Result> esiResultList = esiResults.all();
+		// If we have no ESIs then we have no energy
+		if (esiResultList.isEmpty())
+		{
+			return 0.0;
+		}
+
+		// Get the list of ESIs for this auto CE group
+		List<Integer> esiList = new ArrayList<Integer>();
+		for (Result esiResult : esiResults.all())
+		{
+			EsiCacheData esiCacheData = (EsiCacheData) esiResult.getValue();
+			esiList.add(esiCacheData.getEsiId());
+		}
+
+		// Now get energy consumed for this list of ESIs - VPP only
+		DateTime now = new DateTime();
+		Double totalEnergy = 0.0;
+		long staleTime = now.getMillis() - getStaleTimeMin() * 60 * 1000;
+		Attribute<Double> actEnergyAttr = dcCache.getSearchAttribute("actEnergyConsumed");
+		Attribute<Long> readingTimeAttr = dcCache.getSearchAttribute("readingTime");
+		Attribute<String> deviceTypeAttr = dcCache.getSearchAttribute("deviceType");
+		Attribute<Integer> esiIdAttr = dcCache.getSearchAttribute("esiId");
+
+		Query query = dcCache.createQuery();
+		query.addCriteria(readingTimeAttr.ge(staleTime));
+		query.addCriteria(esiIdAttr.in(esiList));
+		query.addCriteria(deviceTypeAttr.ne(OpsCenterConstants.DC_HVAC_SWITCH));
+		query.addCriteria(deviceTypeAttr.ne(OpsCenterConstants.DC_SINGLE_HEAT));
+		query.addCriteria(deviceTypeAttr.ne(OpsCenterConstants.DC_DUAL_HEAT));
+		query.includeAggregator(actEnergyAttr.sum());
+
+		Results results = query.execute();
+		query.end();
+		List<Result> resultList = results.all();
+		if (!resultList.isEmpty())
+		{
+			Result result = resultList.get(0);
+			totalEnergy = (Double) result.getAggregatorResults().get(0);
+		}
+
+		return totalEnergy;
+	}
+
+	public Results getOtaParamsCacheDataById(Cache cache, String id)
+	{
+
+		Attribute<String> imageIdAttr = cache.getSearchAttribute("imageId");
+
+		Query query = cache.createQuery();
+		query.includeValues();
+		query.addCriteria(imageIdAttr.eq(id));
+		Results results = query.execute();
+		query.end();
+		return results;
+	}
+
+	public Double getCacheDataActEnergyConsumedSumCyclingOnly(Cache cache)
+	{
+		DateTime now = new DateTime();
+		Double totalEnergy = 0.0;
+		long staleTime = now.getMillis() - getStaleTimeMin() * 60 * 1000;
+		Attribute<Double> actEnergy = cache.getSearchAttribute("actEnergyConsumed");
+		Attribute<Long> readingTime = cache.getSearchAttribute("readingTime");
+		Attribute<String> deviceType = cache.getSearchAttribute("deviceType");
+		Query query = cache.createQuery();
+		query.addCriteria(readingTime.ge(staleTime));
+		// Include only HVAC Switch from Cycling Only power consumption
+		query.addCriteria(deviceType.eq(OpsCenterConstants.DC_HVAC_SWITCH));
+		query.addCriteria(deviceType.eq(OpsCenterConstants.DC_SINGLE_HEAT));
+		query.addCriteria(deviceType.eq(OpsCenterConstants.DC_DUAL_HEAT));
+		query.includeAggregator(actEnergy.sum());
+		Results results = query.execute();
+		query.end();
+		List<Result> resultList = results.all();
+		if (!resultList.isEmpty())
+		{
+			Result result = resultList.get(0);
+			totalEnergy = (Double) result.getAggregatorResults().get(0);
+		}
+		return totalEnergy;
+	}
+
+
+	public Cache getGwEsiCache()
+	{
+		return gwEsiCacheMap.get(TenantContext.getCurrentTenant());
+	}
+
+	public void setGwEsiCache(Cache gwEsiCache)
+	{
+		gwEsiCacheMap.put(TenantContext.getCurrentTenant(), gwEsiCache);
+	}
+
+ 
+
+	public Cache getGwDCCache()
+	{
+		return gwDCCacheMap.get(TenantContext.getCurrentTenant());
+	}
+
+	public void setGwDCCache(Cache gwDCCache)
+	{
+		gwDCCacheMap.put(TenantContext.getCurrentTenant(), gwDCCache);
+	}
+
+	/**
+	 * @return the ceGrpCache
+	 */
+
+	public Cache getCeGrpCache()
+	{
+		return ceGrpCacheMap.get(TenantContext.getCurrentTenant());
+	}
+
+	/**
+	 * @param ceGrpCache
+	 *            the ceGrpCache to set
+	 */
+	public void setCeGrpCache(Cache ceGrpCache)
+	{
+		ceGrpCacheMap.put(TenantContext.getCurrentTenant(), ceGrpCache);
+	}
+
+	/**
+	 * @return the ceGrpPowerCache
+	 */
+
+	public Cache getCeGrpPowerCache()
+	{
+		return ceGrpPowerCacheMap.get(TenantContext.getCurrentTenant());
+	}
+
+	/**
+	 * @param ceGrpPowerCache
+	 *            the ceGrpPowerCache to set
+	 */
+	public void setCeGrpPowerCache(Cache ceGrpPowerCache)
+	{
+		ceGrpPowerCacheMap.put(TenantContext.getCurrentTenant(), ceGrpPowerCache);
+	}
+
+	/**
+	 * @return the ceGrpMapCache
+	 */
+
+	public Cache getCeGrpMapCache()
+	{
+		return ceGrpMapCacheMap.get(TenantContext.getCurrentTenant());
+	}
+
+	/**
+	 * @param ceGrpMapCache
+	 *            the ceGrpMapCache to set
+	 */
+	public void setCeGrpMapCache(Cache ceGrpMapCache)
+	{
+		ceGrpMapCacheMap.put(TenantContext.getCurrentTenant(), ceGrpMapCache);
+	}
+
+	/**
+	 * @return the ceDevCache
+	 */
+
+	public Cache getCeDevCache()
+	{
+		return ceDevCacheMap.get(TenantContext.getCurrentTenant());
+	}
+
+	/**
+	 * @param ceDevCache
+	 *            the ceDevCache to set
+	 */
+	public void setCeDevCache(Cache ceDevCache)
+	{
+		ceDevCacheMap.put(TenantContext.getCurrentTenant(), ceDevCache);
+	}
+
+	/**
+	 * @return the controlEventCache
+	 */
+
+	public Cache getControlEventCache()
+	{
+		return controlEventCacheMap.get(TenantContext.getCurrentTenant());
+	}
+
+	/**
+	 * @param controlEventCache
+	 *            the controlEventCache to set
+	 */
+
+	public void setControlEventCache(Cache controlEventCache)
+	{
+		controlEventCacheMap.put(TenantContext.getCurrentTenant(), controlEventCache);
+	}
+
+	/**
+	 * @return the ceAccMapCache
+	 */
+
+	public Cache getCeAccMapCache()
+	{
+		return ceAccMapCacheMap.get(TenantContext.getCurrentTenant());
+	}
+
+	/**
+	 * @param ceAccMapCache
+	 *            the ceAccMapCache to set
+	 */
+	public void setCeAccMapCache(Cache ceAccMapCache)
+	{
+		ceAccMapCacheMap.put(TenantContext.getCurrentTenant(), ceAccMapCache);
+	}
+
+	/**
+	 * @return the ercotCache
+	 */
+
+ 
+ 
+	/**
+	 * @return the BroadcastCache
+	 */
+
+	public Cache getBroadcastCache()
+	{
+		return broadcastCacheMap.get(TenantContext.getCurrentTenant());
+	}
+
+	/**
+	 * @param BroadcastCache
+	 *            the BroadcastCache to set
+	 */
+	public void setBroadcastCache(Cache broadcastCache)
+	{
+		broadcastCacheMap.put(TenantContext.getCurrentTenant(), broadcastCache);
+	}
+
+	/**
+	 * @return the defaultTemplateCache
+	 */
+
+	public Cache getDefaultTemplateCache()
+	{
+		return defaultTemplateCacheMap.get(TenantContext.getCurrentTenant());
+	}
+
+	/**
+	 * @param defaultTemplateCache
+	 */
+	public void setDefaultTemplateCache(Cache defaultTemplateCache)
+	{
+		defaultTemplateCacheMap.put(TenantContext.getCurrentTenant(), defaultTemplateCache);
+	}
+	
+
+	public Cache getGwTstatCache()
+	{
+		return gwTstatCacheMap.get(TenantContext.getCurrentTenant());
+	}
+
+	public void setGwTstatCache(Cache gwTstatCache)
+	{
+		gwTstatCacheMap.put(TenantContext.getCurrentTenant(), gwTstatCache);
+	}
+
+
+	/**
+	 * @return the Compound Key Cache
+	 */
+
+	public Cache getCompoundKeyCache()
+	{
+		return compoundKeyCacheMap.get(TenantContext.getCurrentTenant());
+	}
+
+	/**
+	 * @param compoundKeyCache
+	 *            the Compound Key to set
+	 */
+	public void setCompoundKeyCache(Cache compoundKeyCache)
+	{
+		compoundKeyCacheMap.put(TenantContext.getCurrentTenant(), compoundKeyCache);
+	}
+
+
+	/**
+	 * @return the accountSyncCache
+	 */
+
+	public Cache getAccountSyncCache()
+	{
+		return accountSyncCacheMap.get(TenantContext.getCurrentTenant());
+	}
+
+	/**
+	 * @return the accountUserSyncCache
+	 */
+
+	public Cache getAccountUserSyncCache()
+	{
+		return accountUserSyncCacheMap.get(TenantContext.getCurrentTenant());
+	}
+
+	/**
+	 * @return the gsDeviceCache
+	 */
+
+	public Cache getGsTstatCache()
+	{
+		return gsTstatCacheMap.get(TenantContext.getCurrentTenant());
+	}
+
+	/**
+	 * @param gsDeviceCache
+	 *            to set
+	 */
+	public void setGsTstatCache(Cache gsTstatCache)
+	{
+		gsTstatCacheMap.put(TenantContext.getCurrentTenant(), gsTstatCache);
+	}
+
+	public List<EsiAlertCacheData> getEsiAlertCacheDataForEsiAlert(List<EsiAlert> esiAlertList)
+	{
+		final List<EsiAlertCacheData> esiAlerts;
+		if (esiAlertList != null)
+		{
+			esiAlerts = new ArrayList<EsiAlertCacheData>(esiAlertList.size());
+			for (EsiAlert esiAlert : esiAlertList)
+			{
+				EsiAlertCacheData alertCache = getEsiAlertCacheDataForEsiAlert(esiAlert);
+				esiAlerts.add(alertCache);
+			}
+		}
+		else
+		{
+			esiAlerts = new ArrayList<EsiAlertCacheData>(0);
+		}
+		return esiAlerts;
+	}
+
+	public EsiAlertCacheData getEsiAlertCacheDataForEsiAlert(EsiAlert esiAlert)
+	{
+
+		EsiAlertCacheData alertCache = new EsiAlertCacheData();
+		alertCache.setEsiAlertId(esiAlert.getEsiAlertId());
+		logger.debug("New esiAlertCacheData.getEsiAlertId()=" + alertCache.getEsiAlertId());
+		alertCache.setEsiId(esiAlert.getEsiId());
+		alertCache.setAlertCode(esiAlert.getAlertCode());
+		alertCache.setDeviceClass(esiAlert.getDeviceClass());
+		alertCache.setDeviceId(esiAlert.getDeviceId());
+		alertCache.setAdditionalInformation(esiAlert.getContextSpecificData());
+		alertCache.setDeviceMacId(esiAlert.getDeviceMacId());
+		alertCache.setAlertReported(esiAlert.getAlertReported() != null ? esiAlert.getAlertReported().getMillis() : null);
+		alertCache.setAlertCleared(esiAlert.getAlertCleared() != null ? esiAlert.getAlertCleared().getMillis() : null);
+
+		return alertCache;
+	}
+
+	/**
+	 * @param esiCache
+	 * @param manageMode
+	 */
+
+	public boolean doCacheUpdateAfterHandleEsiMode(EsiCacheData esiCache, byte manageMode, Integer readingIncomingId)
+	{
+
+		byte prevManageMode = esiCache.getEsiMode();
+		logger.info("esi=" + esiCache.getEsiId() + "\tmanageMode=" + manageMode + "\tprevManageMode=" + prevManageMode + "\treadingIncomingId="
+				+ readingIncomingId);
+
+		// Esi esi = null;
+		if (prevManageMode == OpsCenterConstants.ESI_MODE_CONTROL || prevManageMode == OpsCenterConstants.ESI_MODE_UNMANAGED)
+		{
+
+			String key = esiCache.getCacheKey().intern();
+			// synchronizing here just in case there are multiple reads for the
+			// same esi getting processed concurrently on same clone
+			synchronized (key)
+			{
+				if (readingIncomingId != null)
+				{
+					int firstId = esiCache.getFirstReadIdAfterModeChange();
+					logger.debug("firstId=" + firstId);
+					// If first read id is 0 then ignore this first read, b/c it
+					// will always be normal, even though the esi is in control
+					if (firstId <= 0)
+					{
+						esiCache.setFirstReadIdAfterModeChange(readingIncomingId);
+						// esi = (esi == null) ?
+						// esiBeanFacade.findEsiByEsiId(esiCache.getEsiId()) :
+						// esi;
+						// esi.setRoundRobinCount(esiCache.getRoundRobinCnt());
+						return true;
+					}
+					// handles bundling case, b/c every read in the bundle will
+					// have the same messagingIncomingId
+					if (firstId == readingIncomingId.intValue())
+					{
+						return false;
+					}
+				}
+
+				// If the mode did not change then exit
+				// if we just set DNM, then we do not opt out, just skip this
+				// code and
+				// set the mode to DNM below
+				if (manageMode != OpsCenterConstants.ESI_MODE_CONTROL && manageMode != OpsCenterConstants.ESI_MODE_UNMANAGED)
+				{
+					if (esiCache.getCeAccountMapId() > 0)
+					{
+						logger.warn("GLARE Condition: ESI is reporting normal, even though Ops expected control, id=" + esiCache.getEsiId());
+						// DEV-52 we will not opt-out this account as this
+						// condition only exist for first read and does not
+						// impact behavior
+						// during the CE, so set the manage_mode(sent from GW)
+						// to prevManageMode(db mode) which should be control
+						// mode
+						manageMode = prevManageMode;
+					}
+
+				}
+				else if (manageMode == OpsCenterConstants.ESI_MODE_UNMANAGED)
+				{
+					logger.debug("Mode received from GW is UNMANAGED ");
+					CEAccountMapCacheData ceAccountMapCacheData = null;
+					if (esiCache.getCeAccountMapId() > 0)
+					{
+						Element ceAccMapElement = getCeAccMapCache().get(esiCache.getCeAccountMapId());
+						if (ceAccMapElement != null)
+						{
+							ceAccountMapCacheData = (CEAccountMapCacheData) ceAccMapElement.getObjectValue();
+						}
+
+					}
+					if (ceAccountMapCacheData != null)
+					{
+						logger.debug("setting opt-out reason to  UNMANAGED ");
+						esiCache.setEsiMode(manageMode);
+						esiCache.setOptOutReason(OpsCenterConstants.OptOutReason.DO_NOT_MANAGE);
+					}
+				}
+
+			}
+		}
+		// If the mode did not change then exit
+		if (manageMode == prevManageMode)
+		{
+			return false;
+		}
+
+		// The managed mode is getting set via an update b/c that should by pass
+		// the optimistic lock
+		// esi = (esi == null) ?
+		// esiBeanFacade.findEsiByEsiId(esiCache.getEsiId()) : esi;
+		// setManageModeToEsi(esi,manageMode);
+		esiCache.setEsiMode(manageMode);
+		// Inactive is a weird case as it is an Ops only mode, not a GW mode
+		/*
+		 * ManageMode manageModeId;
+		 * 
+		 * if (manageMode == OpsCenterConstants.ESI_MODE_INACTIVE) {
+		 * manageModeId = esiBeanFacade
+		 * .getRefManageMode(OpsCenterConstants.MANAGE_MODE_INACTIVE); } else {
+		 * manageModeId = esiBeanFacade.getManageModeByGatewayMode(manageMode)
+		 * .get(0); } logger.debug("Setting GW Mode in the DB to : " +
+		 * manageModeId.getManageModeName());
+		 * esiBeanFacade.updateEsiManageModes(esiCache.getEsiId(),
+		 * manageModeId);
+		 */
+		return true;
+	}
+
+	public String cacheOtaParameters(OtaParameters otaParam)
+	{
+
+		// see if cache already contains this data
+		String idString = new Short(otaParam.getImageId()).toString().intern();
+		// List <OtaParameters> otaParamList = genericFacade.getOtaParameters();
+
+		String result = null;
+		String fileName = otaParam.getImageName();
+		if (fileName == null || fileName.equals(""))
+			return null;
+		synchronized (idString)
+		{
+			if (!getOtaParamCache().isKeyInCache(idString))
+			{
+
+				// add GW first;
+
+				OtaParametersCacheData otaCache = new OtaParametersCacheData();
+
+				// Now
+				otaCache.setImageId(idString);
+				if (otaParam.getImageChecksum() != 0)
+				{
+					otaCache.setImageChecksum(new Long(otaParam.getImageChecksum()).longValue());
+				}
+				otaCache.setImageRecv(otaParam.getImageUpdateTs());
+				otaCache.setImageActivate(otaParam.getImageActivateTs());
+				otaCache.setMaxNumberPacketsWindow(new Long(otaParam.getPacketWindow()).byteValue());
+				otaCache.setPacketPayloadSize(new Integer(otaParam.getPacketPayloadSize()).shortValue());
+				// needed for CE SP delta graph
+				otaCache.setPacketRetryLimit(new Short(otaParam.getPacketRetryLimit()).byteValue());
+				otaCache.setTimeBetweenPackets(new Short(otaParam.getTimeBetweenPacketsSecs()).byteValue());
+				otaCache.setTimeBetweenPacketsRetry(new Short(otaParam.getTimeBetweenPacketsRetrySecs()).byteValue());
+				otaCache.setOtaTimeoutValueSecs(otaParam.getOtaTimeoutValueSecs());
+				logger.debug("setting otaCache.setOtaTimeoutValueSecs inside cacheOtaParameters to: " + otaCache.getOtaTimeoutValueSecs());
+
+				// this process gets the fw version and stuffs it
+				byte[] newVer = new byte[16];
+				byte[] version = fileName.getBytes();
+				for (int b = 0; b < 16; b++)
+				{
+					if (b >= fileName.length())
+					{
+						newVer[b] = 0x20; // append " " (blanks) to end of
+					}
+					else
+					{
+						newVer[b] = version[b];
+					}
+				}
+				if (OpsCenterConstants.TSTAT_SELECTOR == new Byte(otaParam.getDeviceSelector().trim()).byteValue())
+				{
+					otaCache.setTstatWallPlateImageName(newVer);
+				}
+				else // must be LCS
+				if (OpsCenterConstants.LCS_SELECTOR == new Byte(otaParam.getDeviceSelector().trim()).byteValue())
+				{
+					otaCache.setLcsImageName(newVer);
+				}
+				else // must be LCS
+				if (OpsCenterConstants.MRLCS_SELECTOR == new Byte(otaParam.getDeviceSelector().trim()).byteValue())
+				{
+					otaCache.setMrLcsImageName(newVer);
+				}
+				else
+				{
+					// no devices found in DB, cannot cache ota data, exit
+					logger.error("No OTA data found in DB for either lcs or tstat, could not cache data, exiting");
+
+				}
+
+				Element newElement = new Element(otaCache.getImageId(), otaCache);
+				getOtaParamCache().put(newElement);
+
+				logger.debug("Added OTA Parameters into otaParamCache, fw image id= " + otaCache.getImageId());
+				result = idString;
+
+			}
+			else
+			{
+				result = idString;
+			}
+		}
+
+		return result;
+
+	}
+
+	public String cacheDevOtaParameters(Long devMac)
+	{
+
+		// see if cache already contains this data
+		String idString = new Long(devMac).toString().intern();
+		short empty = 0x00;
+		synchronized (idString)
+		{
+			if (!getDeviceOtaCache().isKeyInCache(idString))
+			{
+
+				logger.debug("Adding new devOtaCache entry for macId =  " + idString);
+
+				// DateTime currTime = new DateTime();
+				List<Device> devOtaList = deviceBeanFacade.getDeviceByDevMacId(devMac);
+				Device devOta = null;
+				if (devOtaList == null || devOtaList.size() <= 0)
+				{
+					devOta = new Device();
+					devOta.setDeviceMacId(devMac);
+					String selector = null;
+					EsiTstat esiTstat = esiBeanFacade.getEsiTstatByDeviceMacId(devMac);
+					if (esiTstat != null)
+					{
+						selector = Integer.toString(new Integer(OpsCenterConstants.TSTAT_SELECTOR));
+					}
+					else
+					{
+						List<EsiDc> esiLCS = esiBeanFacade.getEsiDcByDevMacId(devMac);
+						if(OpsCenterConstants.MR_LCS_MAKE_MODEL.equals(esiLCS.get(0).getMdModel()))
+								selector = Integer.toString(new Integer(OpsCenterConstants.MRLCS_SELECTOR));
+						else
+								selector = Integer.toString(new Integer(OpsCenterConstants.LCS_SELECTOR));
+					}
+					devOta.setDeviceSelector(selector);
+					deviceBeanFacade.createDevice(devOta);
+
+				}
+				else
+				{
+					devOta = devOtaList.get(0);
+				}
+
+				DeviceOtaCacheData devCache = new DeviceOtaCacheData();
+				List<OtaParameters> otaParamList = genericFacade.getOtaParameters();
+				OtaParameters otaParam = otaParamList.get(0);
+
+				//
+				devCache.setCacheKey(idString);
+				devCache.setDeviceId(devOta.getDeviceId());
+				devCache.setDeviceMacId(devMac);
+				if (otaParam.getImageChecksum() != 0)
+				{
+					devCache.setImageCheckSum(new Long(otaParam.getImageChecksum()).longValue());
+				}
+				devCache.setImageId(new Short(otaParam.getImageId()).toString());
+				devCache.setCurrentImageName(otaParam.getImageName());
+				devCache.setEndPacketNumber(empty);
+				devCache.setNextPacketToSend(empty);
+				devCache.setStartPackeNumber(empty);
+				Element newElement = new Element(idString, devCache);
+				getDeviceOtaCache().put(newElement);
+
+			}
+
+		}
+		return idString;
+
+	}
+
+	public OtaParametersCacheData getImageFileUpdateCache(OtaParameters otaParam) throws IOException
+	{
+
+		logger.info("Entering getImageFileUpdateCache ");
+
+		// DateTime currentTime = new DateTime();
+		String fileName = otaParam.getImageName();
+
+		if (fileName == null)
+		{
+			logger.error("No Image File name found in DB, must be provided, terminating OTA process");
+			return null;
+		}
+
+		logger.debug("file name is " + fileName);
+
+		Integer sizeOfPackets = otaParam.getPacketPayloadSize();
+		if (sizeOfPackets == null)
+		{
+			logger.error("Size of packets entry not found in DB, must be provided, terminating OTA process");
+			return null;
+		}
+		// File file = new File(fileName);
+		byte[] image = otaParam.getImageFile();
+
+		if (image == null)
+		{
+			logger.error("No FW Image data found in db, terminating OTA process");
+			return null;
+		}
+		Integer totalSize = image.length;
+
+		if (totalSize == null || totalSize <= 0)
+		{
+			logger.error("Size of image must be greater than zero, terminating OTA process");
+			return null;
+		}
+
+		logger.debug("total length of file = " + totalSize);
+
+		Integer totalPackets = totalSize / sizeOfPackets;
+		logger.debug("total number of packets of size("+sizeOfPackets+")b = " + totalPackets);
+
+		int c = 0;
+		String cacheKey = new Short(otaParam.getImageId()).toString();
+		Map<Integer, byte[]> filePacketsMap = new HashMap<Integer, byte[]>();
+		OtaParametersCacheData otaCache = null;
+
+		// now store the packets array in the cache
+		Element element = getOtaParamCache().get(cacheKey);
+		otaCache = (OtaParametersCacheData) element.getObjectValue();
+
+		if (otaCache == null)
+		{
+			logger.error("No OTA cache element found for key = " + cacheKey + "adding it to cache now");
+			cacheKey = cacheOtaParameters(otaParam);
+			element = getOtaParamCache().get(cacheKey);
+			otaCache = (OtaParametersCacheData) element.getObjectValue();
+		}
+		long chkSum = computeImageChecksum(image).longValue();
+		if (chkSum != otaParam.getImageChecksum())
+		{
+			logger.error("check sum from image, does not match DB checksum, no OTA allowed");
+			return null;
+		}
+		int totalBytesRead = 0;
+		int bytesRead = 0;
+		while (totalBytesRead < totalSize)
+		{
+			int bytesRemaining = totalSize - totalBytesRead;
+			if (bytesRemaining < sizeOfPackets) // Remaining Data Part is
+												// Smaller Than sizeOfPacket
+			// sizeofpackets is assigned to remain volume
+			{
+				sizeOfPackets = bytesRemaining;
+				logger.debug("size of last packet: " + sizeOfPackets);
+			}
+
+			byte[] buffer = new byte[sizeOfPackets]; // Temporary Byte Array
+			try
+			{
+				System.arraycopy(image, bytesRead, buffer, 0, buffer.length);
+				bytesRead = bytesRead + buffer.length;
+			} catch (Exception e)
+			{
+				e.printStackTrace();
+				return null;
+			}
+			filePacketsMap.put(c, buffer);
+			c++;
+
+			if (bytesRead > 0)
+			{
+				totalBytesRead = bytesRead;
+			}
+
+		}
+
+		// this process gets the fw version and stuffs it
+		byte[] newVer = new byte[16];
+		byte[] version = fileName.getBytes();
+		for (int b = 0; b < 16; b++)
+		{
+			if (b >= fileName.length())
+			{
+				newVer[b] = 0x20; // append " " (blanks) to end of version
+			}
+			else
+			{
+				newVer[b] = version[b];
+			}
+		}
+
+		// now update rest of cache
+		otaCache.setTstatWallPlateImageName(newVer);
+		otaCache.setImageChecksum(chkSum);
+		otaCache.setImageRecv(otaParam.getImageUpdateTs());
+		otaCache.setImageActivate(otaParam.getImageActivateTs());
+		otaCache.setPacketPayloadSize(new Integer(otaParam.getPacketPayloadSize()).shortValue());
+		otaCache.setTimeBetweenPackets(new Short(otaParam.getTimeBetweenPacketsSecs()).byteValue());
+		otaCache.setPacketRetryLimit(new Short(otaParam.getPacketRetryLimit()).byteValue());
+		otaCache.setMaxNumberPacketsWindow(new Short(otaParam.getPacketWindow()).byteValue());
+		otaCache.setTimeBetweenPacketsRetry(new Short(otaParam.getTimeBetweenPacketsRetrySecs()).byteValue());
+
+		Short fastTimeBtPkts = otaParam.getFastTimeBtwnPktsSecs();
+		otaCache.setFastTimeBetweenPackets(fastTimeBtPkts.byteValue());
+
+		Short fastPacketRetryLimit = otaParam.getFaskPktRetryLimit();
+		otaCache.setFastPacketRetryLimit(fastPacketRetryLimit.byteValue());
+
+		Short fastPacketWindow = otaParam.getFastPktWindow();
+		otaCache.setFastMaxNumberPacketsWindow(fastPacketWindow.byteValue());
+
+		Short fastTimeBtPktsRetry = otaParam.getFastTimeBtwnPktsRetrySecs();
+		otaCache.setFastTimeBetweenPacketsRetry(fastTimeBtPktsRetry.byteValue());
+
+		otaCache.setTstatWPPackets(filePacketsMap);
+		otaCache.setImageSize(totalSize);
+		otaCache.setOtaTimeoutValueSecs(otaParam.getOtaTimeoutValueSecs());
+		logger.debug("setting otaCache.setOtaTimeoutValueSecs inside getImageFileUpdateCache to" + otaCache.getOtaTimeoutValueSecs());
+		logger.debug("just added packeMap to otaCache " + filePacketsMap.size());
+
+		getOtaParamCache().put(element);
+		return otaCache;
+	}
+
+	/**
+	 * @throws IOException
+	 */
+	private Long computeImageChecksum(byte[] file) throws IOException
+	{
+
+		logger.info("Entering computeImageChecksum ");
+
+		Checksum checksum = new CRC32();
+
+		// update the current checksum with the specified array of bytes
+		checksum.update(file, 0, file.length);
+
+		// get the current checksum value
+		Long checkSumValue = new Long(checksum.getValue()).longValue();
+
+		logger.debug("CRC32 checksum for file is: " + checkSumValue);
+
+		return checkSumValue;
+
+	}
+
+	/**
+	 * @return the otaParamCache
+	 */
+
+	public Cache getOtaParamCache()
+	{
+		return otaParamCacheMap.get(TenantContext.getCurrentTenant());
+	}
+
+	/**
+	 * @param otaParamCache
+	 *            the otaParamCache to set
+	 */
+	public void setOtaParamCache(Cache otaParamCache)
+	{
+		otaParamCacheMap.put(TenantContext.getCurrentTenant(), otaParamCache);
+	}
+
+	/**
+	 * @return the deviceOtaCache
+	 */
+
+	public Cache getDeviceOtaCache()
+	{
+		return deviceOtaCacheMap.get(TenantContext.getCurrentTenant());
+	}
+
+	/**
+	 * @param deviceOtaCache
+	 *            the deviceOtaCache to set
+	 */
+	public void setDeviceOtaCache(Cache deviceOtaCache)
+	{
+		deviceOtaCacheMap.put(TenantContext.getCurrentTenant(), deviceOtaCache);
+	}
+
+	/**
+	 * Get the stale time in minutes one time
+	 *
+	 * @return
+	 */
+
+	public int getStaleTimeMin()
+	{
+		if (staleTimeMin == -1)
+		{
+			try
+			{
+				String staleTimeMinString = genericBean.getUtilityPropertyByKeyOrProperty(PropertyUtil.READING_STALE_TIME_MIN);
+				if (staleTimeMinString == null)
+				{
+					staleTimeMin = PropertyUtil.getInstance().getPowerReadingStaleTimeMin();
+				}
+				else
+				{
+					staleTimeMin = Integer.parseInt(staleTimeMinString);
+				}
+			} catch (Exception exp)
+			{
+				logger.debug("Exception during getStaleTimeMin.  Using default", exp);
+
+				staleTimeMin = PropertyUtil.DEFAULT_STALE_TIME_MIN;
+			}
+		}
+
+		return staleTimeMin;
+	}
+
+	/**
+	 * Get the stale time in minutes one time
+	 *
+	 * @return
+	 */
+
+	public int getReadingIntervalMin(int deliveryNetworkId)
+	{
+		int DEFAULT_READING_TIME_MIN = 5;
+
+		int readingIntervalMin = DEFAULT_READING_TIME_MIN;
+		if (readingIntervalMinByNetwork.size() == 0)
+		{
+			readingIntervalMin = DEFAULT_READING_TIME_MIN;
+			try
+			{
+				List<DeliveryNetwork> deliveryNetworks = genericFacade.getDeliveryNetworks();
+				if (deliveryNetworks != null)
+				{
+					for (DeliveryNetwork deliveryNetwork : deliveryNetworks)
+					{
+						if (deliveryNetwork.getAllowedMessageLatency() >= DEFAULT_READING_TIME_MIN)
+						{
+							int deliveryLatency = new Integer(deliveryNetwork.getAllowedMessageLatency());
+							readingIntervalMinByNetwork.put(deliveryNetwork.getDeliveryNetworkId(), deliveryLatency);
+
+							logger.debug("getreadingIntervalMin.  Set Interval for ", deliveryNetwork.getHwId() + " to :" + deliveryLatency);
+						}
+						else
+						{
+							readingIntervalMinByNetwork.put(deliveryNetwork.getDeliveryNetworkId(), DEFAULT_READING_TIME_MIN);
+
+							logger.debug("getreadingIntervalMin.  Set Interval for ", deliveryNetwork.getHwId() + " to default :" + DEFAULT_READING_TIME_MIN);
+						}
+					}
+				}
+			} catch (Exception exp)
+			{
+				logger.debug("Exception during getreadingIntervalMin.  Using default", exp);
+			}
+		}
+
+		if (readingIntervalMinByNetwork.containsKey(deliveryNetworkId))
+		{
+			readingIntervalMin = readingIntervalMinByNetwork.get(deliveryNetworkId);
+		}
+
+		return readingIntervalMin;
+	}
+
+	public static String getCacheKey(int devid, int gatewayMqId)
+	{
+		return getCacheKey(devid, Integer.toString(gatewayMqId));
+	}
+
+	private static String getCacheKey(int esiMqId, String devKey)
+	{
+		StringBuilder id = new StringBuilder();
+		id.append(esiMqId);
+		id.append("|");
+		id.append(devKey);
+		return id.toString();
+	}
+
+	public void cacheEsiAlerts(List<EsiAlert> esiAlerts)
+	{
+		List<Integer> esiIdList = new ArrayList<Integer>();
+		Map<Integer, EsiCacheData> esiCacheById = new HashMap<Integer, EsiCacheData>();
+		List<Element> esiElementList = new ArrayList<Element>();
+
+		for (EsiAlert alert : esiAlerts)
+		{
+			esiIdList.add(alert.getEsiId());
+		}
+
+		Results esiResults = getAllCacheByEsiIdList(getGwEsiCache(), esiIdList);
+		for (Result esi : esiResults.all())
+		{
+			EsiCacheData esiCacheData = (EsiCacheData) esi.getValue();
+			if (esiCacheData == null)
+			{
+				continue;
+			}
+
+			if (esiCacheData.getEsiAlerts() != null)
+			{
+				esiCacheById.put(esiCacheData.getEsiId(), esiCacheData);
+				esiElementList.add(new Element(esiCacheData.getCacheKey(), esiCacheData));
+			}
+		}
+
+		for (EsiAlert alert : esiAlerts)
+		{
+			final EsiAlertCacheData esiAlertCache = getEsiAlertCacheDataForEsiAlert(alert);
+			final EsiCacheData esiCache = esiCacheById.get(alert.getEsiId());
+			if (esiCache != null)
+			{
+				final List<EsiAlertCacheData> esiAlertList = esiCache.getEsiAlerts();
+				if (esiAlertList != null)
+				{
+					ArrayList<EsiAlertCacheData> list = new ArrayList<EsiAlertCacheData>(esiAlertList);
+					list.add(esiAlertCache);
+					esiCache.setEsiAlerts(list);
+				}
+			}
+		}
+
+		getGwEsiCache().putAll(esiElementList);
+	}
+
+	private static synchronized List<Integer> getCEActiveEsiDcIdList(Cache ceDevCache)
+	{
+
+		DateTime newTSUpdated = new DateTime();
+
+		if (null == ceActiveEsiDcIdList || ceActiveEsiDcIdList.isEmpty())
+		{
+
+			List<?> ceDevCacheKeys = ceDevCache.getKeys();
+			for (Object ceDevKey : ceDevCacheKeys)
+			{
+
+				Element element = ceDevCache.get(ceDevKey);
+				if (null != element && null != element.getObjectValue())
+				{
+					CEDevicesCacheData ceDevicesCacheData = (CEDevicesCacheData) element.getObjectValue();
+
+					if (ceDevicesCacheData.getEndTime() == 0)
+					{
+						Integer esiDc = ceDevicesCacheData.getEsiDcId();
+						ceActiveEsiDcIdList.add(esiDc);
+					}
+				}
+			}
+
+			lastTSCeActiveListUpdated = new DateTime();
+		}
+		else if (lastTSCeActiveListUpdated.getMillis() + 240000 < newTSUpdated.getMillis())
+		{
+			ceActiveEsiDcIdList = new ArrayList<Integer>();
+
+			List<?> ceDevCacheKeys = ceDevCache.getKeys();
+			for (Object ceDevKey : ceDevCacheKeys)
+			{
+
+				Element element = ceDevCache.get(ceDevKey);
+				if (null != element && null != element.getObjectValue())
+				{
+					CEDevicesCacheData ceDevicesCacheData = (CEDevicesCacheData) element.getObjectValue();
+
+					if (ceDevicesCacheData.getEndTime() == 0)
+					{
+						Integer esiDc = ceDevicesCacheData.getEsiDcId();
+						ceActiveEsiDcIdList.add(esiDc);
+					}
+				}
+			}
+
+			lastTSCeActiveListUpdated = new DateTime();
+		}
+
+		return ceActiveEsiDcIdList;
+
+	}
+
+	private synchronized Map<Integer, List<CEAccountMapCacheData>> getCEAccountMapCacheDataListByEsiId()
+	{
+		DateTime newTSUpdated = new DateTime();
+
+		if (lastTSAccountMapCacheDataListUpdated.getMillis() + 60000 < newTSUpdated.getMillis())
+		{
+			lastTSAccountMapCacheDataListUpdated = new DateTime();
+
+			return cacheManagerBean.buildCEAccountMapCacheDataListByEsiIdMap(getCeAccMapCache());
+		}
+
+		return ceAccountMapCacheDataListByEsiIdMap;
+
+	}
+
+	private List<CEAccountMapCacheData> getCEAccountMapCacheDataForEsiId(Integer esiId)
+	{
+		Map<Integer, List<CEAccountMapCacheData>> ceAccountMapCacheDataMap = getCEAccountMapCacheDataListByEsiId();
+
+		List<CEAccountMapCacheData> ceAccountMapCacheDataList = ceAccountMapCacheDataMap.get(esiId);
+
+		return ceAccountMapCacheDataList;
+	}
+
+	public static Map<Integer, List<CEAccountMapCacheData>> buildCEAccountMapCacheDataListByEsiIdMap(Cache ceAccMapCache)
+	{
+
+		Map<Integer, List<CEAccountMapCacheData>> tempMap = new HashMap<Integer, List<CEAccountMapCacheData>>();
+
+		List<?> ceAccMapCacheKeys = ceAccMapCache.getKeys();
+		for (Object ceDevKey : ceAccMapCacheKeys)
+		{
+
+			Element element = ceAccMapCache.get(ceDevKey);
+			if (null != element && null != element.getObjectValue())
+			{
+				CEAccountMapCacheData ceAccMapCacheData = (CEAccountMapCacheData) element.getObjectValue();
+
+				if (null == tempMap.get(ceAccMapCacheData.getEsiId()))
+				{
+					Integer esiId = ceAccMapCacheData.getEsiId();
+					List<CEAccountMapCacheData> ceAccountMapCacheDataList = new ArrayList<CEAccountMapCacheData>();
+					ceAccountMapCacheDataList.add(ceAccMapCacheData);
+					tempMap.put(esiId, ceAccountMapCacheDataList);
+				}
+				else
+				{
+					Integer esiId = ceAccMapCacheData.getEsiId();
+					List<CEAccountMapCacheData> ceAccountMapCacheDataList = tempMap.get(ceAccMapCacheData.getEsiId());
+					ceAccountMapCacheDataList.add(ceAccMapCacheData);
+					tempMap.put(esiId, ceAccountMapCacheDataList);
+				}
+			}
+		}
+		return tempMap;
+
+	}
+
+	private void handleTstatOverrideAndDrift(EsiCacheData esiCache, EsiDcFlagCacheData esiDcFlagCacheData)
+	{
+
+		final List<EsiCacheData> flaggedEsiRunList = new ArrayList<EsiCacheData>();
+		final List<CEAccountMapCacheData> flaggedCeAcctMapRunList = new ArrayList<CEAccountMapCacheData>();
+		final Set<Integer> driftingEsiDcIdSet = new HashSet<Integer>();
+		final Set<Integer> tstatOverrideEsiDcIdSet = new HashSet<Integer>();
+		final Set<Integer> invalidReadsEsiDcIdSet = new HashSet<Integer>();
+
+		int esiAccMapId = esiCache.getCeAccountMapId();
+		if (esiAccMapId == 0)
+		{
+			logger.error("ESI not in CE or GS ESI,  keep searching: esiId, esiMode, actEnergy, accountId= " + esiCache.getEsiId() + "/" + esiCache.getEsiMode()
+					+ "/" + esiCache.getActEnergyConsumed() + "/" + esiCache.getAccountId());
+		}
+		else
+		{
+
+			Element accMapElement = getCeAccMapCache().get(esiAccMapId);
+			if (accMapElement == null)
+			{
+				logger.error("ERROR -Account map ID not found in AccMapCache for ESI = / AccMapId " + esiCache.getEsiId() + "/" + esiAccMapId);
+				return;
+			}
+
+			CEAccountMapCacheData ceAccMapCache = (CEAccountMapCacheData) accMapElement.getObjectValue();
+
+			flaggedCeAcctMapRunList.add(ceAccMapCache);
+			flaggedEsiRunList.add(esiCache);
+
+			if (esiDcFlagCacheData.getCeFlag() == OpsCenterConstants.CE_ESI_DC_FLAG_TSTAT_DRIFTING)
+			{
+				driftingEsiDcIdSet.add(esiDcFlagCacheData.getEsiDcId());
+			}
+			else if (esiDcFlagCacheData.getCeFlag() == OpsCenterConstants.CE_ESI_DC_FLAG_TSTAT_OVERRIDE)
+			{
+				tstatOverrideEsiDcIdSet.add(esiDcFlagCacheData.getEsiDcId());
+			}
+
+			try
+			{
+				controlEventPowerBean.handleTstatAndReplacePowerForCe(flaggedEsiRunList, flaggedCeAcctMapRunList, driftingEsiDcIdSet, tstatOverrideEsiDcIdSet,
+						invalidReadsEsiDcIdSet);
+			} catch (Exception e)
+			{
+				logger.error(e.getMessage(), e);
+			}
+		}
+	}
+
+	public Results getCacheDataByCeIdAndMode(Cache cache, int ceId, List<Integer> esiList)
+	{
+
+		Attribute<Integer> ce = cache.getSearchAttribute("ceId");
+		Attribute<Byte> dcMode = cache.getSearchAttribute("dcMode");
+		Attribute<String> optOutFlag = cache.getSearchAttribute("optOutFlag");
+		Attribute<Integer> esiId = cache.getSearchAttribute("esiId");
+
+		Query query = cache.createQuery();
+		query.includeValues();
+		query.addCriteria(ce.eq(ceId).and(esiId.in(esiList)).and(dcMode.eq(OpsCenterConstants.ESI_MODE_CONTROL)).and(optOutFlag.eq(OpsCenterConstants.FALSE)));
+		Results results = query.execute();
+		return results;
+
+	}
+
+	private void updateGSEsiDNMTrue(int esi)
+	{
+
+		Results results = getCacheDataByEsiId(getGsTstatCache(), esi);
+
+		for (Result result : results.all())
+		{
+			GridStreamTstatCacheData tstatCacheData = (GridStreamTstatCacheData) result.getValue();
+			// passing esi as null, since it is only required when pushing
+			// programs which is when DNM should be set false. Doing this to
+			// avoid hitting the database to fetch the esi object.
+			userBean.updateGSDeviceTstatDNM(null, tstatCacheData, OpsCenterConstants.TRUE);
+
+		}
+
+		// now figure out if there are LCS devices and set them to DNM
+		results = getCacheDataByEsiId(getGwDCCache(), esi);
+
+		for (Result result : results.all())
+		{
+			EsiDcCacheData esiDcCacheData = (EsiDcCacheData) result.getValue();
+			// passing esi as null, since it is only required when pushing
+			// programs which is when DNM should be set false
+			userBean.updateGSDeviceLcsDNM(null, esiDcCacheData, OpsCenterConstants.TRUE);
+		}
+
+	}
+
+	public void updateGsEsiCache(Esi esi)
+	{
+		logger.info("[ENTER] CacheManagerBean.updateGsEsiCache , Esi_id = " + esi.getEsiId());
+
+		Element esiElement = null;
+		EsiCacheData esiCache = null;
+		
+		DateTime currTime = new DateTime();
+		
+		String id = (new EsiCacheKeyBuilder()).getEsiKey(esi.getEsiId());
+		
+		// see if reading already exists for this interval
+		if (!getGwEsiCache().isKeyInCache(id))
+		{
+			esiCache = new EsiCacheData();
+			esiCache.setCacheKey(id);
+			esiElement = new Element(esiCache.getCacheKey(), esiCache);
+		}
+		else
+		{
+			// found already in cache just update the data in the element
+			esiElement = getGwEsiCache().get(id);
+			esiCache = (EsiCacheData) esiElement.getObjectValue();
+		}
+
+		List<CeGroupAccountMap> ceGrpAccList = controlEventBeanFacade.getCeGroupAccountMapByAccountId(esi.getAccountId().getAccountId());
+		boolean grpAvail = true;
+		if (ceGrpAccList.isEmpty())
+		{
+			logger.error("ERROR -No GRPs assigned to this ESI, GRP id not stored in cache");
+			grpAvail = false;
+		}
+		
+		int esiGWidx = esi.getEsiGatewayId().getEsiGatewayId();
+		esiCache.setEsiGatewayId(esiGWidx);
+		esiCache.setEsiId(esi.getEsiId());
+		esiCache.setEsiMqId(esi.getEsiMqId());
+		// ESI for GS is not used -- esi_dc/esi_tstat is where mode is
+		esiCache.setEsiMode(OpsCenterConstants.ESI_MODE_NORMAL);
+		esiCache.setNumOfAlerts(0xff);
+		esiCache.setGrpIdList(null);
+		esiCache.setActEnergyConsumed(0.0);
+		esiCache.setActEnergyAvail(0.0);
+		esiCache.setTimeZoneOlsonName(esi.getAccountId().getTimezoneId().getOlsonName());
+
+		if (esi.getAccountId().getAutoCeGroupId() != null)
+		{
+			esiCache.setAutoGroupId(esi.getAccountId().getAutoCeGroupId().getCeGroupId());
+		}
+		else
+		{
+			esiCache.setAutoGroupId(0);
+		}
+
+		esiCache.setAccountId(esi.getAccountId().getAccountId());
+		esiCache.setRoundRobinCnt(esi.getRoundRobinCount());
+		esiCache.setCeId(0);
+		esiCache.setLastMqRecdTime(currTime);
+		esiCache.setBundlingPeriodicReadsFlag(OpsCenterConstants.FALSE);
+		esiCache.setCeAccountMapId(0);
+		esiCache.setOptOutFlag(OpsCenterConstants.FALSE);
+		esiCache.setEnergyConsumedByDeviceType(new HashMap<String, Double>());
+		esiCache.setNwType(OpsCenterConstants.GRIDSTREAM_RF_DELIVERY);
+		esiCache.setDeliveryNetworkId(esi.getNetworkDeliveryId());
+
+		if (grpAvail)
+		{
+			List<Integer> grpIdList = new ArrayList<Integer>();
+			for (CeGroupAccountMap grpAcc : ceGrpAccList)
+			{
+				grpIdList.add(grpAcc.getCeGroupId().getCeGroupId());
+			}
+			esiCache.setGrpIdList(grpIdList);
+		}
+		
+		getGwEsiCache().put(esiElement);
+		logger.info("[EXIT] CacheManagerBean.updateGsEsiCache , Added Esi to the cache, Esi_id = " + esiCache.getEsiId());
+	
+	}	
+	
+	public void updateDeviceName(int esiDcId, String newDeviceName)
+	{
+		logger.info("[ENTER] CacheManagerBean.updateDeviceName()");
+		Results results = cacheManagerBean.getCacheDataByEsiDcId(cacheManagerBean.getGwDCCache(), esiDcId);
+		List<Result> resultList = results.all();
+		for (Result result : resultList)
+		{
+			EsiDcCacheData data = (EsiDcCacheData) result.getValue();
+			if (data != null)
+			{
+				logger.info("updated device name {} to {}", data.getDeviceName(), newDeviceName);
+				data.setDeviceName(newDeviceName);
+				Element element = new Element(data.getCacheKey(), data);
+				cacheManagerBean.getGwDCCache().put(element);
+			}
+		}
+		logger.info("[EXIT] CacheManagerBean.updateDeviceName()");
+	}
+}
